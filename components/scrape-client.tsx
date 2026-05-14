@@ -139,6 +139,110 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     }
   }
 
+  /**
+   * Run the enrichment phase using the async start+poll pattern. Outer loop:
+   * call /enrich/start to kick off ONE Apify run for up to 1000 pending
+   * handles; persist the requestedHandles list. Inner loop: call /enrich/poll
+   * (SSE) repeatedly until that Apify run is fully processed. Outer loop
+   * exits when /start reports no more pending derivable handles.
+   *
+   * Returns true on success, false if any error happened.
+   */
+  async function runEnrichmentPhase(): Promise<boolean> {
+    // Outer cap protects against an infinite loop if a bug ever causes
+    // /start to keep returning the same handles. 50 outer iterations ×
+    // 1000 handles per Apify run = 50k max enrichments per scrape.
+    const OUTER_CAP = 50;
+    const INNER_POLL_RETRY_CAP = 30;
+    let outerOk = true;
+
+    for (let outer = 0; outer < OUTER_CAP; outer++) {
+      // Step 1: kick off Apify enrichment run.
+      let apifyRunId: string;
+      let requestedHandles: string[];
+      let totalPending: number;
+      try {
+        const startResp = await fetch("/api/scrape/enrich/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!startResp.ok) {
+          const txt = await startResp.text().catch(() => "");
+          append({
+            stage: "error",
+            message: `Failed to start enrich Apify run: ${startResp.status} ${txt || startResp.statusText}`,
+          });
+          return false;
+        }
+        const json = (await startResp.json()) as {
+          apifyRunId: string | null;
+          requestedHandles: string[];
+          totalRequested: number;
+          totalPending: number;
+        };
+        if (!json.apifyRunId || json.totalRequested === 0) {
+          append({
+            stage: "done",
+            message: `Enrichment complete — no more pending derivable handles (${json.totalPending} total pending in DB).`,
+          });
+          return outerOk;
+        }
+        apifyRunId = json.apifyRunId;
+        requestedHandles = json.requestedHandles;
+        totalPending = json.totalPending;
+      } catch (err) {
+        append({
+          stage: "error",
+          message: `Network error starting enrich: ${(err as Error).message}`,
+        });
+        return false;
+      }
+
+      append({
+        stage: "enriching",
+        message: `Apify enrichment run #${outer + 1}: ${requestedHandles.length} handles in one batch (${totalPending} total pending in DB)`,
+      });
+
+      // Step 2: poll until this Apify run is fully processed.
+      let runFinished = false;
+      for (let p = 0; p < INNER_POLL_RETRY_CAP; p++) {
+        const last = await streamPost("/api/scrape/enrich/poll", {
+          apifyRunId,
+          requestedHandles,
+        });
+        if (!last) {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        if (last.stage === "error") {
+          outerOk = false;
+          runFinished = true;
+          break;
+        }
+        if (last.stage === "done") {
+          runFinished = true;
+          break;
+        }
+        // __POLL_AGAIN__ marker — pause briefly, then re-poll.
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (!runFinished) {
+        append({
+          stage: "error",
+          message: `Hit poll cap (${INNER_POLL_RETRY_CAP}) for enrich run ${apifyRunId.slice(0, 8)}.`,
+        });
+        return false;
+      }
+    }
+
+    append({
+      stage: "error",
+      message: `Hit outer cap (${OUTER_CAP}) on enrichment phase. Run /scrape again to continue.`,
+    });
+    return false;
+  }
+
   async function runGoogleScrape(req: ScrapeRequest) {
     setEvents([]);
     setRunning(true);
@@ -182,28 +286,8 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
 
       if (req.enrichInstagram) {
         append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
-        // 1000 batches × 15 leads = 15,000 max enrichments per scrape.
-        // Safety cap exists to prevent a real bug from running up Apify
-        // bills, not to limit normal usage.
-        const SAFETY_CAP = 1000;
-        let i = 0;
-        while (i++ < SAFETY_CAP) {
-          const last = await streamPost("/api/scrape/enrich", { batchSize: 15 });
-          if (!last) break;
-          if (last.stage === "error") {
-            hadError = true;
-            break;
-          }
-          const remaining = last.counts?.remaining ?? 0;
-          if (remaining <= 0) break;
-        }
-        if (i >= SAFETY_CAP) {
-          hadError = true;
-          append({
-            stage: "error",
-            message: `Hit safety cap (${SAFETY_CAP} batches). Stopping enrichment loop.`,
-          });
-        }
+        const ok = await runEnrichmentPhase();
+        if (!ok) hadError = true;
       }
 
       append({ stage: "done", message: "Scrape complete." });
@@ -323,32 +407,15 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         }
       }
 
-      // After discovery, run enrichment in batches. The enrich endpoint
-      // sets qualified=true for AI-confirmed coaches, false otherwise
-      // (respecting any manual overrides).
+      // After discovery, run enrichment using the async start+poll pattern.
+      // The enrich endpoint sets qualified=true for AI-confirmed coaches,
+      // false otherwise (respecting any manual overrides).
       append({
         stage: "enriching",
-        message: "Discovery done. Now enriching profiles + classifying coaches in batches of 3…",
+        message: "Discovery done. Now enriching profiles + classifying coaches via async Apify run…",
       });
-      const SAFETY_CAP = 300;
-      let i = 0;
-      while (i++ < SAFETY_CAP) {
-        const last = await streamPost("/api/scrape/enrich", { batchSize: 3 });
-        if (!last) break;
-        if (last.stage === "error") {
-          hadError = true;
-          break;
-        }
-        const remaining = last.counts?.remaining ?? 0;
-        if (remaining <= 0) break;
-      }
-      if (i >= SAFETY_CAP) {
-        hadError = true;
-        append({
-          stage: "error",
-          message: `Hit safety cap (${SAFETY_CAP} batches). Stopping enrichment loop.`,
-        });
-      }
+      const ok = await runEnrichmentPhase();
+      if (!ok) hadError = true;
 
       append({ stage: "done", message: "IG scrape complete." });
     } catch (err) {
