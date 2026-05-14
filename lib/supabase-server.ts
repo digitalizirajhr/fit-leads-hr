@@ -31,5 +31,13 @@ export function getServerSupabase() {
       persistSession: false,
       autoRefreshToken: false,
     },
+    global: {
+      // Bypass Next.js' fetch cache. Without this, Supabase reads get cached
+      // by the App Router and stale values render after PATCH/POST updates,
+      // even with `dynamic = "force-dynamic"` on the page (that flag controls
+      // route caching, not the underlying fetch cache).
+      fetch: (input, init) =>
+        fetch(input, { ...init, cache: "no-store" } as RequestInit),
+    },
   });
 }
