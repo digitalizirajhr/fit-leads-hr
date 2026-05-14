@@ -16,6 +16,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { ExportDialog } from "@/components/export-dialog";
 import { StatusSelect } from "@/components/status-select";
 import { PriorityStars } from "@/components/priority-stars";
+import { QualifiedToggle } from "@/components/qualified-toggle";
 import { croatianSort, formatRelativeTime, truncateUrl } from "@/lib/format";
 import type { Lead } from "@/lib/types";
 
@@ -112,6 +113,7 @@ export function LeadsTable({ leads }: Props) {
               <TableHead className="w-8">
                 <Checkbox checked={allOnPageSelected} onCheckedChange={toggleAll} aria-label="Select all" />
               </TableHead>
+              <TableHead className="w-8" aria-label="Qualified state"></TableHead>
               <SortableTH onClick={() => clickHeader("name")} active={sortKey === "name"} dir={sortDir}>
                 Name
               </SortableTH>
@@ -196,6 +198,13 @@ function LeadRow({
     <TableRow data-state={selected ? "selected" : undefined}>
       <TableCell>
         <Checkbox checked={selected} onCheckedChange={onToggle} aria-label={`Select ${lead.name}`} />
+      </TableCell>
+      <TableCell>
+        <QualifiedToggle
+          leadId={lead.id}
+          qualified={lead.qualified}
+          qualifiedOverride={lead.qualified_override}
+        />
       </TableCell>
       <TableCell className="font-medium">
         <Link href={`/leads/${lead.id}`} className="hover:underline underline-offset-4">

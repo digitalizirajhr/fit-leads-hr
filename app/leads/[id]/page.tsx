@@ -9,6 +9,7 @@ import { NotesEditor } from "@/components/notes-editor";
 import { OutreachLog } from "@/components/outreach-log";
 import { AddOutreachForm } from "@/components/add-outreach-form";
 import { CopyText } from "@/components/copy-text";
+import { QualifiedToggle } from "@/components/qualified-toggle";
 import { formatRelativeTime, truncateUrl } from "@/lib/format";
 import type { Lead, OutreachEntry } from "@/lib/types";
 
@@ -53,11 +54,20 @@ export default async function LeadDetailPage({ params }: PageProps) {
           ← All leads
         </Link>
         <h1 className="text-xl font-semibold">{lead.name}</h1>
-        {lead.qualified ? (
-          <Badge variant="secondary" className="bg-green-900/40 text-green-300">
-            qualified
-          </Badge>
-        ) : null}
+        <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+          <QualifiedToggle
+            leadId={lead.id}
+            qualified={lead.qualified}
+            qualifiedOverride={lead.qualified_override}
+          />
+          {lead.qualified_override === true
+            ? "qualified (manual)"
+            : lead.qualified_override === false
+              ? "unqualified (manual)"
+              : lead.qualified
+                ? "qualified (rule)"
+                : "not qualified (rule)"}
+        </span>
         <div className="ml-auto">
           <StatusSelect leadId={lead.id} value={lead.status} />
         </div>
