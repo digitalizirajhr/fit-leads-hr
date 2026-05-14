@@ -43,6 +43,8 @@ export interface Lead {
   // Derived flags
   has_real_website: boolean;
   qualified: boolean;
+  /** Manual override of `qualified`. null = follow rule, true/false = forced. */
+  qualified_override: boolean | null;
 
   // CRM fields
   status: LeadStatus;
@@ -72,6 +74,41 @@ export type ScrapeStage =
   | "saving"
   | "done"
   | "error";
+
+/**
+ * Configurable qualification rule, edited via /settings and stored in the
+ * singleton `settings` row's `qualification_rules` JSONB column. AND logic
+ * across all enabled criteria — disabled criteria pass through.
+ */
+export interface QualificationRule {
+  requireNoWebsite: boolean;
+  requirePhone: boolean;
+  minGoogleRating: number | null;
+  minReviewCount: number | null;
+  requireInstagram: boolean;
+  requireActiveInstagram: boolean;
+  minInstagramFollowers: number | null;
+  /** null = no city restriction. Empty array also means "no restriction" (the
+   *  toggle is on but no cities ticked yet). */
+  allowedCities: string[] | null;
+}
+
+export const DEFAULT_RULE: QualificationRule = {
+  requireNoWebsite: true,
+  requirePhone: true,
+  minGoogleRating: null,
+  minReviewCount: null,
+  requireInstagram: false,
+  requireActiveInstagram: false,
+  minInstagramFollowers: null,
+  allowedCities: null,
+};
+
+/** What /api/settings returns. */
+export interface Settings {
+  rule: QualificationRule;
+  customTerms: string[];
+}
 
 export interface ScrapeEvent {
   stage: ScrapeStage;
