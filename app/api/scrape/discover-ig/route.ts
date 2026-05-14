@@ -1,8 +1,6 @@
 import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
-import { enrichAll } from "@/lib/instagram";
 import { discoverHandles, type DiscoveryMethod } from "@/lib/instagram-discovery";
-import { filterCoaches } from "@/lib/coach-classifier";
 import { computeQualified } from "@/lib/qualification";
 import { requireAuth } from "@/lib/require-auth";
 import { linkLeadsToRun } from "@/lib/scrape-runs";
@@ -152,77 +150,40 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        // ---- 3. Enrich via existing instagram-profile-scraper ----
-        send({ stage: "enriching", term, message: `Enriching ${toEnrich.length} profiles…` });
-        const enrichedMap = await enrichAll(toEnrich, apifyToken);
-        const enriched = Array.from(enrichedMap.values());
-        send({
-          stage: "enriching",
-          term,
-          message: `Got ${enriched.length} profiles back`,
-          counts: { found: enriched.length },
-        });
-
-        // ---- 4. Coach filter (keyword + AI fallback) ----
-        send({ stage: "filtering", term, message: `Filtering for fitness coaches…` });
-        const coaches = await filterCoaches(enriched, {
-          onAiCall: (n) =>
-            send({
-              stage: "filtering",
-              term,
-              message: `${n} bios sent to Claude Haiku for fallback classification`,
-            }),
-          onAiError: (n) =>
-            send({
-              stage: "filtering",
-              term,
-              message: `${n} AI calls failed (no credits / network) — kept those profiles for manual review`,
-            }),
-        });
-        send({
-          stage: "filtering",
-          term,
-          message: `${coaches.length} of ${enriched.length} look like coaches`,
-        });
-
-        if (coaches.length === 0) {
-          send({
-            stage: "done",
-            term,
-            message: `No coaches kept after filter.`,
-            counts: { found: candidates.length, qualified: 0, new: 0, skipped: skippedExisting },
-          });
-          controller.close();
-          return;
-        }
-
-        // ---- 5. Build rows + upsert ----
-        const rows = coaches.map((p) => ({
-          place_id: `ig:${p.handle}`,
-          name: p.handle, // No fullName field on EnrichedProfile; handle is unique enough
+        // ---- 3. Upsert RAW handles (no enrichment in this call) ----
+        // Enrichment happens via the separate /api/scrape/enrich polling
+        // endpoint after this returns — that pattern keeps each request
+        // under Vercel's 60s function timeout. With 100+ candidates, doing
+        // enrichment inline here would blow past the timeout (Apify takes
+        // ~30-45s per 5 handles).
+        const rows = toEnrich.map((handle) => ({
+          place_id: `ig:${handle}`,
+          name: handle, // Replaced with full name once enrichment fills bio/followers.
           phone: null,
-          current_website: `https://instagram.com/${p.handle}`,
+          current_website: `https://instagram.com/${handle}`,
           address: null,
           city: null,
           latitude: null,
           longitude: null,
           google_rating: null,
           google_review_count: null,
-          instagram_handle: p.handle,
-          instagram_followers: p.followers,
-          instagram_bio: p.bio,
-          instagram_last_post_at: p.latestPostAt,
-          instagram_is_active: p.isActive,
+          instagram_handle: handle,
+          instagram_followers: null,
+          instagram_bio: null,
+          instagram_last_post_at: null,
+          instagram_is_active: null,
           has_real_website: false,
+          // Computed against current rule with placeholder data — will be
+          // recomputed by the enrich endpoint once bio/followers land.
           qualified: computeQualified(
             {
               has_real_website: false,
               phone: null,
               google_rating: null,
               google_review_count: null,
-              instagram_handle: p.handle,
-              instagram_is_active: p.isActive,
-              instagram_followers: p.followers,
+              instagram_handle: handle,
+              instagram_is_active: null,
+              instagram_followers: null,
               city: null,
             },
             rule,
@@ -233,7 +194,7 @@ export async function POST(req: NextRequest) {
         send({
           stage: "saving",
           term,
-          message: `Upserting ${rows.length} (${qualifiedCount} qualified)…`,
+          message: `Upserting ${rows.length} raw handles (${qualifiedCount} qualified pre-enrichment)…`,
         });
 
         const { error: upsertErr } = await supabase
@@ -253,7 +214,7 @@ export async function POST(req: NextRequest) {
         send({
           stage: "done",
           term,
-          message: `Done ${method}: +${rows.length} (${qualifiedCount} qualified, ${skippedExisting} skipped)`,
+          message: `Done ${method}: +${rows.length} raw rows. Enrichment + AI bio classification will run next (separate calls).`,
           counts: {
             found: candidates.length,
             qualified: qualifiedCount,

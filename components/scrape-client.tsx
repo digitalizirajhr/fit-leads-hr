@@ -247,6 +247,34 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           totals.skipped += last.counts.skipped ?? 0;
         }
       }
+
+      // After discovery, run enrichment in batches. The enrich endpoint
+      // sets qualified=true for AI-confirmed coaches, false otherwise
+      // (respecting any manual overrides).
+      append({
+        stage: "enriching",
+        message: "Discovery done. Now enriching profiles + classifying coaches in batches of 3…",
+      });
+      const SAFETY_CAP = 300;
+      let i = 0;
+      while (i++ < SAFETY_CAP) {
+        const last = await streamPost("/api/scrape/enrich", { batchSize: 3 });
+        if (!last) break;
+        if (last.stage === "error") {
+          hadError = true;
+          break;
+        }
+        const remaining = last.counts?.remaining ?? 0;
+        if (remaining <= 0) break;
+      }
+      if (i >= SAFETY_CAP) {
+        hadError = true;
+        append({
+          stage: "error",
+          message: `Hit safety cap (${SAFETY_CAP} batches). Stopping enrichment loop.`,
+        });
+      }
+
       append({ stage: "done", message: "IG scrape complete." });
     } catch (err) {
       hadError = true;

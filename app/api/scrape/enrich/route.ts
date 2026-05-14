@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { extractHandle, enrichAll } from "@/lib/instagram";
+import { filterCoaches } from "@/lib/coach-classifier";
 import { requireAuth } from "@/lib/require-auth";
 import type { ScrapeEvent } from "@/lib/types";
 
@@ -97,21 +98,62 @@ export async function POST(req: NextRequest) {
 
         const enriched = await enrichAll(handles, apifyToken);
 
+        // Run AI/keyword coach classifier on the enriched profiles. Output
+        // is the SUBSET considered coaches; we use it to set `qualified` for
+        // each row (true if coach, false otherwise) — but only when the row
+        // doesn't have a manual override. This way the existing manual
+        // override semantics are preserved.
+        const profilesArr = Array.from(enriched.values());
+        const coaches = await filterCoaches(profilesArr, {
+          onAiCall: (n) =>
+            send({
+              stage: "filtering",
+              message: `${n} bios sent to Claude Haiku for coach classification`,
+            }),
+          onAiError: (n) =>
+            send({
+              stage: "filtering",
+              message: `${n} AI calls failed (no credits / network) — those profiles kept as not-qualified`,
+            }),
+        });
+        const coachHandles = new Set(coaches.map((c) => c.handle.toLowerCase()));
+
+        // Fetch existing override flags so we don't clobber manual choices.
+        const { data: overrideRows } = await supabase
+          .from("leads")
+          .select("place_id, qualified_override")
+          .in("place_id", placeIds);
+        const overrideMap = new Map(
+          (overrideRows ?? []).map((r) => [
+            r.place_id as string,
+            r.qualified_override as boolean | null,
+          ]),
+        );
+
         // Per-place_id UPDATE (not upsert — rows already exist).
         let processed = 0;
         for (const placeId of placeIds) {
           const handle = handlesByPlaceId.get(placeId)!;
           const profile = enriched.get(handle);
           if (!profile) continue;
+
+          const isCoach = coachHandles.has(handle);
+          const override = overrideMap.get(placeId);
+          const updates: Record<string, unknown> = {
+            instagram_handle: profile.handle,
+            instagram_followers: profile.followers,
+            instagram_bio: profile.bio,
+            instagram_last_post_at: profile.latestPostAt,
+            instagram_is_active: profile.isActive,
+          };
+          // Only auto-update qualified when there's no manual override.
+          if (override === null || override === undefined) {
+            updates.qualified = isCoach;
+          }
+
           const { error: igErr } = await supabase
             .from("leads")
-            .update({
-              instagram_handle: profile.handle,
-              instagram_followers: profile.followers,
-              instagram_bio: profile.bio,
-              instagram_last_post_at: profile.latestPostAt,
-              instagram_is_active: profile.isActive,
-            })
+            .update(updates)
             .eq("place_id", placeId);
           if (!igErr) processed++;
         }
