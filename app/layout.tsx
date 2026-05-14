@@ -35,6 +35,9 @@ export default function RootLayout({
           <Link href="/scrape" className="text-muted-foreground hover:text-foreground">
             Scrape
           </Link>
+          <Link href="/settings" className="text-muted-foreground hover:text-foreground">
+            Settings
+          </Link>
           <span className="ml-auto text-xs text-muted-foreground">fit-leads-hr</span>
         </nav>
         {children}
