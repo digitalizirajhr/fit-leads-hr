@@ -9,14 +9,16 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 interface Body {
-  /** How many leads to enrich per request. Apify timing scales roughly linearly
-   *  per profile, so we keep batches small to fit the 60s function timeout. */
+  /** How many leads to enrich per request. Apify's instagram-profile-scraper
+   *  has a fixed ~5–10 s cold-start tax per call, so bigger batches are
+   *  significantly more efficient. We cap at 25 to stay well under the 60 s
+   *  Vercel function timeout even when AI classification is slow. */
   batchSize?: number;
 }
 
-const DEFAULT_BATCH = 3;
+const DEFAULT_BATCH = 15;
 const MIN_BATCH = 1;
-const MAX_BATCH = 10;
+const MAX_BATCH = 25;
 
 /**
  * POST /api/scrape/enrich — process the next batch of pending IG enrichments.
@@ -60,11 +62,27 @@ export async function POST(req: NextRequest) {
       try {
         const supabase = getServerSupabase();
 
-        // Find ALL leads needing enrichment so we can report `remaining`.
+        // Get the TRUE total pending count first. Supabase / PostgREST
+        // applies an implicit row cap (~1000) on plain SELECTs, so without
+        // this `head + count: 'exact'` query we'd think there were only
+        // ~1000 pending even when the real backlog is ten times that —
+        // and the user would see the "752 of 752" loop forever even though
+        // the pool was actually shrinking.
+        const { count: truePendingCount } = await supabase
+          .from("leads")
+          .select("*", { count: "exact", head: true })
+          .is("instagram_followers", null);
+
+        // Now fetch enough rows to actually pick a deterministic batch.
+        // Sorted by created_at so each call picks "the oldest pending"
+        // (PostgREST's default order is arbitrary, which would let
+        // already-processed-yet-still-in-pool rows shadow each other).
         const { data: pending, error: pendErr } = await supabase
           .from("leads")
           .select("place_id, current_website, instagram_handle")
-          .is("instagram_followers", null);
+          .is("instagram_followers", null)
+          .order("created_at", { ascending: true })
+          .limit(50000);
         if (pendErr) throw new Error(`Pending query: ${pendErr.message}`);
 
         // Build place_id -> handle for those with a derivable handle.
@@ -75,25 +93,27 @@ export async function POST(req: NextRequest) {
           if (handle) handlesByPlaceId.set(row.place_id as string, handle.toLowerCase());
         }
 
-        const totalPending = handlesByPlaceId.size;
+        const totalDerivable = handlesByPlaceId.size;
+        const totalPending = truePendingCount ?? totalDerivable;
 
-        if (totalPending === 0) {
+        if (totalDerivable === 0) {
           send({
             stage: "done",
-            message: "No leads need IG enrichment.",
+            message: `No leads with derivable IG handles need enrichment (${totalPending} pending without handle).`,
             counts: { processed: 0, remaining: 0 },
           });
           controller.close();
           return;
         }
 
-        // Take next batch (Map preserves insertion order).
+        // Take next batch (Map preserves insertion order from pending,
+        // which is now sorted oldest-first).
         const placeIds = Array.from(handlesByPlaceId.keys()).slice(0, batchSize);
         const handles = placeIds.map((pid) => handlesByPlaceId.get(pid)!);
 
         send({
           stage: "enriching",
-          message: `Enriching ${placeIds.length} of ${totalPending} pending IG profiles…`,
+          message: `Enriching ${placeIds.length} of ${totalDerivable} derivable handles (${totalPending} total pending in DB)…`,
         });
 
         const enriched = await enrichAll(handles, apifyToken);
@@ -183,10 +203,13 @@ export async function POST(req: NextRequest) {
           message: `DB confirmed ${updatedRowCount}/${placeIds.length} rows updated (sample place_id: ${placeIds[0]})`,
         });
 
-        const remaining = totalPending - placeIds.length;
+        // `remaining` is over the DERIVABLE-handle pool — that's what the
+        // client loops on, since rows without derivable handles will never
+        // be picked up by enrichment and would otherwise loop forever.
+        const remaining = totalDerivable - placeIds.length;
         send({
           stage: "done",
-          message: `Enriched ${processed}/${placeIds.length} this batch · ${remaining} pending`,
+          message: `Enriched ${processed}/${placeIds.length} this batch · ${remaining} derivable handles pending`,
           counts: { processed, remaining },
         });
       } catch (err) {

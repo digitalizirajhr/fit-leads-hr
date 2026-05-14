@@ -182,10 +182,13 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
 
       if (req.enrichInstagram) {
         append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
-        const SAFETY_CAP = 300;
+        // 1000 batches × 15 leads = 15,000 max enrichments per scrape.
+        // Safety cap exists to prevent a real bug from running up Apify
+        // bills, not to limit normal usage.
+        const SAFETY_CAP = 1000;
         let i = 0;
         while (i++ < SAFETY_CAP) {
-          const last = await streamPost("/api/scrape/enrich", { batchSize: 3 });
+          const last = await streamPost("/api/scrape/enrich", { batchSize: 15 });
           if (!last) break;
           if (last.stage === "error") {
             hadError = true;

@@ -96,10 +96,17 @@ export async function filterCoaches(
 
   if (apiKey && aiCandidates.length > 0) {
     opts?.onAiCall?.(aiCandidates.length);
+    // Parallel — each Haiku call is ~500-1500 ms; sequential adds up
+    // fast at 15-25 candidates per batch. Anthropic's free tier and our
+    // first paid tier both allow plenty of concurrent requests for
+    // single-user workloads, so concurrency isn't a real risk.
+    const verdicts = await Promise.all(
+      aiCandidates.map((p) => aiClassifyBio(p.bio!, apiKey)),
+    );
     let errorCount = 0;
-    // Sequential to keep cost / rate-limit predictable. Haiku is fast.
-    for (const p of aiCandidates) {
-      const verdict = await aiClassifyBio(p.bio!, apiKey);
+    for (let i = 0; i < aiCandidates.length; i++) {
+      const p = aiCandidates[i];
+      const verdict = verdicts[i];
       if (verdict === true) {
         kept.push(p);
       } else if (verdict === null) {
