@@ -141,6 +141,7 @@ export async function POST(req: NextRequest) {
         // are vanishingly rare for our purposes.
         let processed = 0;
         let unreachable = 0;
+        let updatedRowCount = 0; // diagnostic: how many DB rows actually flipped
         for (const placeId of placeIds) {
           const handle = handlesByPlaceId.get(placeId)!;
           const profile = enriched.get(handle);
@@ -158,11 +159,16 @@ export async function POST(req: NextRequest) {
             updates.qualified = isCoach;
           }
 
-          const { error: igErr } = await supabase
+          // .select() so we can count the affected rows. If this is 0, the
+          // place_id we pulled from the pending SELECT didn't match anything
+          // on UPDATE — that would explain the "752 pending forever" loop.
+          const { data: updatedRows, error: igErr } = await supabase
             .from("leads")
             .update(updates)
-            .eq("place_id", placeId);
+            .eq("place_id", placeId)
+            .select("place_id");
           if (!igErr) processed++;
+          if (updatedRows && updatedRows.length > 0) updatedRowCount++;
           if (!profile) unreachable++;
         }
         if (unreachable > 0) {
@@ -171,6 +177,11 @@ export async function POST(req: NextRequest) {
             message: `${unreachable} handles were unreachable (private / deleted) — marked as tried so they don't loop`,
           });
         }
+        // Always emit row-count diagnostic so we can see if updates landed.
+        send({
+          stage: "filtering",
+          message: `DB confirmed ${updatedRowCount}/${placeIds.length} rows updated (sample place_id: ${placeIds[0]})`,
+        });
 
         const remaining = totalPending - placeIds.length;
         send({
