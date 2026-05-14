@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { CustomTermsManager } from "@/components/custom-terms-manager";
 
 const CITIES = [
   "Zagreb", "Split", "Rijeka", "Osijek", "Zadar",
@@ -32,13 +33,17 @@ export interface ScrapeRequest {
 interface Props {
   onSubmit: (req: ScrapeRequest) => void;
   running: boolean;
+  customTerms: string[];
 }
 
-export function ScrapeForm({ onSubmit, running }: Props) {
+export function ScrapeForm({ onSubmit, running, customTerms }: Props) {
   const [selectedCities, setSelectedCities] = useState<Set<string>>(new Set());
   const [selectedTerms, setSelectedTerms] = useState<Set<string>>(new Set());
   const [enrichInstagram, setEnrichInstagram] = useState(false);
   const [skipExisting, setSkipExisting] = useState(true);
+
+  // Defaults + Igor's custom terms (managed via /settings, also editable inline below).
+  const ALL_TERMS = [...TERMS, ...customTerms];
 
   function toggleSet<T>(set: Set<T>, value: T): Set<T> {
     const next = new Set(set);
@@ -90,14 +95,14 @@ export function ScrapeForm({ onSubmit, running }: Props) {
         title="Search terms"
         actions={
           <>
-            <BulkLink onClick={() => setSelectedTerms(new Set(TERMS))}>Select all</BulkLink>
+            <BulkLink onClick={() => setSelectedTerms(new Set(ALL_TERMS))}>Select all</BulkLink>
             <span className="text-muted-foreground">·</span>
             <BulkLink onClick={() => setSelectedTerms(new Set())}>Clear</BulkLink>
           </>
         }
       >
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
-          {TERMS.map((t) => (
+          {ALL_TERMS.map((t) => (
             <label key={t} className="flex items-center gap-2 text-sm">
               <Checkbox
                 checked={selectedTerms.has(t)}
@@ -106,6 +111,13 @@ export function ScrapeForm({ onSubmit, running }: Props) {
               {t}
             </label>
           ))}
+        </div>
+
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="mb-2 text-xs text-muted-foreground">
+            Add a custom term — saves to settings, appears here next time too.
+          </p>
+          <CustomTermsManager initialTerms={customTerms} />
         </div>
       </Section>
 

@@ -23,7 +23,11 @@ import type { ScrapeEvent } from "@/lib/types";
  * Errors in any single chunk emit an error event but DON'T stop the loop —
  * a transient quota hiccup or one bad city shouldn't waste the rest.
  */
-export function ScrapeClient() {
+interface ScrapeClientProps {
+  initialCustomTerms: string[];
+}
+
+export function ScrapeClient({ initialCustomTerms }: ScrapeClientProps) {
   const [events, setEvents] = useState<ScrapeEvent[]>([]);
   const [running, setRunning] = useState(false);
 
@@ -157,7 +161,11 @@ export function ScrapeClient() {
 
   return (
     <>
-      <ScrapeForm onSubmit={runScrape} running={running} />
+      <ScrapeForm
+        onSubmit={runScrape}
+        running={running}
+        customTerms={initialCustomTerms}
+      />
       <ScrapeProgress events={events} running={running} />
     </>
   );
