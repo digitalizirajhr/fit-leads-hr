@@ -90,7 +90,7 @@ export function ScrapeFormInstagram({
       />
       <Field
         label="Seed accounts"
-        hint='Comma-separated usernames, no @. e.g. "iyaprivanovic, vilim.puclin". Pulls their followers.'
+        hint='Comma-separated usernames, no @. e.g. "iyaprivanovic, vilim.puclin". Pulls accounts these seeds FOLLOW (their peers in the fitness scene), not their followers.'
         value={seeds}
         onChange={setSeeds}
       />

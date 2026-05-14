@@ -5,9 +5,10 @@
 // Actor IDs verified against https://apify.com/store on 2026-05-14:
 //   - apify/instagram-hashtag-scraper      (official)
 //   - apify/instagram-scraper              (official, multi-purpose)
-//   - louisdeconinck/instagram-followers-scraper  (community — official Apify
-//     no longer publishes a follower-list actor; this one is the most
-//     maintained alternative as of 2026-05)
+//   - louisdeconinck/instagram-following-scraper (community — scrapes the
+//     "following" list of a profile, i.e. accounts the seed FOLLOWS. We use
+//     "following" not "followers" because a coach's peers are who THEY follow;
+//     their followers are mostly clients and have lower lead-gen signal.)
 
 const MAX_RESULTS_PER_CALL = 100;
 
@@ -15,8 +16,8 @@ const HASHTAG_ENDPOINT =
   "https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items";
 const GENERIC_ENDPOINT =
   "https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items";
-const FOLLOWERS_ENDPOINT =
-  "https://api.apify.com/v2/acts/louisdeconinck~instagram-followers-scraper/run-sync-get-dataset-items";
+const FOLLOWING_ENDPOINT =
+  "https://api.apify.com/v2/acts/louisdeconinck~instagram-following-scraper/run-sync-get-dataset-items";
 
 export type DiscoveryMethod = "hashtag" | "location" | "seed" | "bio_keyword";
 
@@ -26,7 +27,7 @@ interface ApifyPost {
 interface ApifyUser {
   username?: string;
 }
-interface ApifyFollower {
+interface ApifyFollowedAccount {
   username?: string;
 }
 
@@ -97,10 +98,11 @@ export async function discoverByLocations(
 }
 
 /**
- * Followers of given seed accounts. Community actor — input is one or more
- * usernames; output is the followers list per account, deduped here.
+ * Accounts that the given seeds FOLLOW (not their followers). The intuition:
+ * a fitness coach follows other fitness coaches (peers, mentors, friends in
+ * the industry); their followers are mostly clients with low lead-gen signal.
  */
-export async function discoverBySeedFollowers(
+export async function discoverBySeedFollowing(
   seedUsernames: string[],
   apifyToken: string,
 ): Promise<string[]> {
@@ -108,8 +110,8 @@ export async function discoverBySeedFollowers(
     .map((u) => u.replace(/^@/, "").trim())
     .filter(Boolean);
   if (cleaned.length === 0) return [];
-  const url = `${FOLLOWERS_ENDPOINT}?token=${apifyToken}`;
-  const items = await postJson<ApifyFollower[]>(url, {
+  const url = `${FOLLOWING_ENDPOINT}?token=${apifyToken}`;
+  const items = await postJson<ApifyFollowedAccount[]>(url, {
     usernames: cleaned,
     resultsLimit: MAX_RESULTS_PER_CALL,
   });
@@ -149,7 +151,7 @@ export async function discoverHandles(
     case "location":
       return discoverByLocations(values, apifyToken);
     case "seed":
-      return discoverBySeedFollowers(values, apifyToken);
+      return discoverBySeedFollowing(values, apifyToken);
     case "bio_keyword":
       return discoverByBioKeywords(values, apifyToken);
   }
