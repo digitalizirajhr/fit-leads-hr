@@ -67,7 +67,10 @@ export function AddOutreachForm({ leadId }: { leadId: string }) {
 
       <div className="space-y-1.5">
         <Label className="text-xs">Method</Label>
-        <Select value={method} onValueChange={(v) => setMethod(v as OutreachMethod)}>
+        <Select
+          value={method}
+          onValueChange={(v: string | null) => v && setMethod(v as OutreachMethod)}
+        >
           <SelectTrigger className="h-8 w-full">
             <SelectValue />
           </SelectTrigger>

@@ -38,7 +38,8 @@ export function StatusSelect({ leadId, value }: Props) {
   const [current, setCurrent] = useState<LeadStatus>(value);
   const [isPending, startTransition] = useTransition();
 
-  async function onChange(next: string) {
+  async function onChange(next: string | null) {
+    if (next === null) return; // base-ui can fire null on clear; we don't expose a clear path
     const nextStatus = next as LeadStatus;
     setCurrent(nextStatus); // optimistic
     startTransition(async () => {

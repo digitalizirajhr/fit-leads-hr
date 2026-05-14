@@ -69,7 +69,10 @@ export function LeadsFilters({ cities, shownCount, totalCount }: Props) {
         className="h-8 w-56"
       />
 
-      <Select value={cityValue} onValueChange={(v) => setParam("city", v === ALL ? null : v)}>
+      <Select
+        value={cityValue}
+        onValueChange={(v: string | null) => setParam("city", v === null || v === ALL ? null : v)}
+      >
         <SelectTrigger className="h-8 w-44">
           <SelectValue placeholder="All cities" />
         </SelectTrigger>
@@ -83,7 +86,10 @@ export function LeadsFilters({ cities, shownCount, totalCount }: Props) {
         </SelectContent>
       </Select>
 
-      <Select value={statusValue} onValueChange={(v) => setParam("status", v === ALL ? null : v)}>
+      <Select
+        value={statusValue}
+        onValueChange={(v: string | null) => setParam("status", v === null || v === ALL ? null : v)}
+      >
         <SelectTrigger className="h-8 w-36">
           <SelectValue placeholder="All statuses" />
         </SelectTrigger>
