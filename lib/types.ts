@@ -83,5 +83,9 @@ export interface ScrapeEvent {
     qualified?: number;
     new?: number;
     skipped?: number;
+    /** IG enrich: how many leads we updated this batch. */
+    processed?: number;
+    /** IG enrich: how many candidates remain after this batch (client polls until 0). */
+    remaining?: number;
   };
 }
