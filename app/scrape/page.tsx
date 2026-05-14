@@ -1,86 +1,16 @@
-"use client";
-
-import { useState } from "react";
-import { ScrapeForm, type ScrapeRequest } from "@/components/scrape-form";
-import { ScrapeProgress } from "@/components/scrape-progress";
-import type { ScrapeEvent } from "@/lib/types";
+import { ScrapeClient } from "@/components/scrape-client";
 
 /**
  * /scrape — the form + live progress page.
  *
- * Browsers' native EventSource doesn't support POST, so we use fetch + a
- * ReadableStream consumer to read the SSE stream from /api/scrape line by
- * line. Each "data: {...}\n\n" frame becomes one ScrapeEvent appended to
- * local state, which <ScrapeProgress/> renders.
+ * Server component that decides at render time whether to expose the form.
+ * On Vercel (`process.env.VERCEL === "1"`) the scrape pipeline can't run
+ * (Google Places + HEAD checks + Apify takes 5–15 min, way past Vercel's
+ * function timeout), so we show a friendly "local-only" message instead.
+ * Locally we delegate to <ScrapeClient/>, which owns the SSE state.
  */
 export default function ScrapePage() {
-  const [events, setEvents] = useState<ScrapeEvent[]>([]);
-  const [running, setRunning] = useState(false);
-
-  async function runScrape(req: ScrapeRequest) {
-    setEvents([]);
-    setRunning(true);
-
-    try {
-      const res = await fetch("/api/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      });
-
-      if (!res.ok || !res.body) {
-        const errText = await res.text().catch(() => "");
-        setEvents((p) => [
-          ...p,
-          {
-            stage: "error",
-            message: `Request failed (${res.status}): ${errText || res.statusText}`,
-          },
-        ]);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE frames end with a blank line (\n\n). Split, keep last partial.
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
-          // A frame may contain multiple lines; we only care about "data:".
-          for (const line of frame.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (!payload) continue;
-            try {
-              const ev = JSON.parse(payload) as ScrapeEvent;
-              setEvents((prev) => [...prev, ev]);
-            } catch {
-              // Malformed frame — log it as an error event so the user sees something.
-              setEvents((prev) => [
-                ...prev,
-                { stage: "error", message: `Bad SSE frame: ${payload}` },
-              ]);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      setEvents((prev) => [
-        ...prev,
-        { stage: "error", message: `Network error: ${(err as Error).message}` },
-      ]);
-    } finally {
-      setRunning(false);
-    }
-  }
+  const onVercel = process.env.VERCEL === "1";
 
   return (
     <main className="mx-auto max-w-screen-lg space-y-6 p-6">
@@ -89,12 +19,41 @@ export default function ScrapePage() {
         <p className="mt-1 text-sm text-muted-foreground">
           Pulls fitness coaches from Google Places (New) for the selected cities and
           search terms. Filters down to those without a real website + with a phone.
-          Runs locally only — pipeline can take 5–15 minutes for the full Croatia sweep.
         </p>
       </header>
 
-      <ScrapeForm onSubmit={runScrape} running={running} />
-      <ScrapeProgress events={events} running={running} />
+      {onVercel ? <LocalOnlyMessage /> : <ScrapeClient />}
     </main>
+  );
+}
+
+function LocalOnlyMessage() {
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 p-6">
+      <h2 className="text-base font-medium">Scraping runs locally only</h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        A full Croatia sweep takes 5–15 minutes — well past Vercel&apos;s function
+        timeout. So the deployed app is read/edit-only. To pull new leads, run
+        the scraper on your laptop:
+      </p>
+      <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+        <li>
+          Open Terminal:{" "}
+          <code className="rounded bg-background px-1.5 py-0.5 text-xs">
+            cd ~/Code/fit-leads-hr && npm run dev
+          </code>
+        </li>
+        <li>
+          Visit{" "}
+          <code className="rounded bg-background px-1.5 py-0.5 text-xs">
+            http://localhost:3000/scrape
+          </code>
+        </li>
+        <li>
+          Run the form there — leads sync to Supabase and appear here on the deployed
+          /leads page automatically.
+        </li>
+      </ol>
+    </div>
   );
 }
