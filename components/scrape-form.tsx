@@ -121,14 +121,15 @@ export function ScrapeForm({ onSubmit, running }: Props) {
           <Switch checked={skipExisting} onCheckedChange={setSkipExisting} />
         </label>
 
-        <label className="flex items-center justify-between gap-4 opacity-60">
+        <label className="flex items-center justify-between gap-4">
           <div>
             <Label className="text-sm">Also enrich with Instagram (Apify)</Label>
             <p className="text-xs text-muted-foreground">
-              Coming in step 8. ~€0.002 per profile.
+              For leads whose listed website is an Instagram URL: pull follower count,
+              bio, and last-post timestamp. ~€0.002 per profile. Skips leads already enriched.
             </p>
           </div>
-          <Switch checked={enrichInstagram} onCheckedChange={setEnrichInstagram} disabled />
+          <Switch checked={enrichInstagram} onCheckedChange={setEnrichInstagram} />
         </label>
       </div>
 

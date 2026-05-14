@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { searchPlaces, type RawPlace } from "@/lib/places";
 import { checkWebsitesParallel } from "@/lib/website-check";
+import { enrichAll, extractHandle } from "@/lib/instagram";
 import type { ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -13,7 +14,7 @@ export const maxDuration = 300;
 interface ScrapeBody {
   cities?: string[];
   terms?: string[];
-  enrichInstagram?: boolean; // ignored in step 6, lives in step 8
+  enrichInstagram?: boolean;
   skipExisting?: boolean;
 }
 
@@ -198,6 +199,134 @@ export async function POST(req: NextRequest) {
           .from("leads")
           .upsert(rows, { onConflict: "place_id" });
         if (upsertErr) throw new Error(`Upsert failed: ${upsertErr.message}`);
+
+        // ---- 7. Optional Instagram enrichment ----
+        if (body.enrichInstagram) {
+          const apifyToken = process.env.APIFY_TOKEN;
+          if (!apifyToken) {
+            send({
+              stage: "error",
+              message: "APIFY_TOKEN not set; skipping Instagram enrichment.",
+            });
+          } else {
+            // Re-fetch the just-upserted leads to know their post-upsert state
+            // and to filter to the ones that NEED enrichment (instagram_followers
+            // IS NULL). This is the idempotency guard: re-running with skip-
+            // existing OFF won't re-charge Apify for already-enriched leads.
+            const { data: candidates, error: candErr } = await supabase
+              .from("leads")
+              .select("place_id, current_website, instagram_handle")
+              .in("place_id", rows.map((r) => r.place_id))
+              .is("instagram_followers", null);
+
+            if (candErr) {
+              send({ stage: "error", message: `IG candidate query failed: ${candErr.message}` });
+            } else {
+              // Build place_id -> handle map. Prefer extracting from
+              // current_website (the IG-as-website case); fall back to any
+              // existing instagram_handle column (a previous run could have
+              // set it without ever running enrichment, e.g. via manual SQL).
+              const handlesByPlaceId = new Map<string, string>();
+              for (const row of candidates ?? []) {
+                const fromWebsite = extractHandle(row.current_website as string | null);
+                const handle = fromWebsite ?? (row.instagram_handle as string | null);
+                if (handle) handlesByPlaceId.set(row.place_id as string, handle.toLowerCase());
+              }
+
+              const uniqueHandles = Array.from(new Set(handlesByPlaceId.values()));
+
+              if (uniqueHandles.length === 0) {
+                send({
+                  stage: "enriching",
+                  message: "No leads with an Instagram handle to enrich.",
+                });
+              } else {
+                send({
+                  stage: "enriching",
+                  message: `Enriching ${uniqueHandles.length} IG profiles in batches of 50…`,
+                });
+
+                try {
+                  const enriched = await enrichAll(
+                    uniqueHandles,
+                    apifyToken,
+                    (i, total, size) => {
+                      send({
+                        stage: "enriching",
+                        message: `Apify batch ${i}/${total} (${size} handles)…`,
+                      });
+                    },
+                  );
+
+                  // Build per-place_id update rows. Skip place_ids whose handle
+                  // didn't come back from Apify (private / deleted / blocked).
+                  const igUpdates: Array<{
+                    place_id: string;
+                    instagram_handle: string;
+                    instagram_followers: number | null;
+                    instagram_bio: string | null;
+                    instagram_last_post_at: string | null;
+                    instagram_is_active: boolean | null;
+                  }> = [];
+                  for (const [placeId, handle] of handlesByPlaceId) {
+                    const profile = enriched.get(handle);
+                    if (!profile) continue;
+                    igUpdates.push({
+                      place_id: placeId,
+                      instagram_handle: profile.handle,
+                      instagram_followers: profile.followers,
+                      instagram_bio: profile.bio,
+                      instagram_last_post_at: profile.latestPostAt,
+                      instagram_is_active: profile.isActive,
+                    });
+                  }
+
+                  if (igUpdates.length > 0) {
+                    send({
+                      stage: "saving",
+                      message: `Writing IG data for ${igUpdates.length} of ${uniqueHandles.length} handles…`,
+                    });
+                    // Per-row UPDATE (not upsert): these leads already exist by
+                    // place_id, and a real upsert would try INSERT first and
+                    // fail the `name NOT NULL` constraint since we don't send
+                    // the name in the IG payload.
+                    let updateFailures = 0;
+                    for (const u of igUpdates) {
+                      const { place_id, ...patch } = u;
+                      const { error: igErr } = await supabase
+                        .from("leads")
+                        .update(patch)
+                        .eq("place_id", place_id);
+                      if (igErr) {
+                        updateFailures++;
+                        send({
+                          stage: "error",
+                          message: `IG update failed for ${place_id}: ${igErr.message}`,
+                        });
+                      }
+                    }
+                    if (updateFailures === 0) {
+                      send({
+                        stage: "enriching",
+                        message: `IG enrichment complete: ${igUpdates.length} leads updated.`,
+                      });
+                    }
+                  } else {
+                    send({
+                      stage: "enriching",
+                      message: "Apify returned 0 matching profiles.",
+                    });
+                  }
+                } catch (err) {
+                  send({
+                    stage: "error",
+                    message: `Apify enrichment error: ${(err as Error).message}`,
+                  });
+                }
+              }
+            }
+          }
+        }
 
         send({
           stage: "done",
