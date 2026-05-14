@@ -43,6 +43,9 @@ export default async function RootLayout({
           <Link href="/scrape" className="text-muted-foreground hover:text-foreground">
             Scrape
           </Link>
+          <Link href="/history" className="text-muted-foreground hover:text-foreground">
+            History
+          </Link>
           {user ? (
             <span className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
               <span>{user.email}</span>

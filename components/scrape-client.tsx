@@ -102,9 +102,50 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     return last;
   }
 
+  /** POST /api/scrape-runs at the start; returns the new run id (or null on failure). */
+  async function createRun(
+    source: "google" | "instagram",
+    params: object,
+  ): Promise<string | null> {
+    try {
+      const r = await fetch("/api/scrape-runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, params }),
+      });
+      if (!r.ok) return null;
+      const j = (await r.json()) as { id?: string };
+      return j.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** POST /api/scrape-runs/:id/finalize at the end. Best-effort. */
+  async function finalizeRun(
+    runId: string,
+    status: "done" | "error",
+    counts: { found: number; qualified: number; new: number; skipped: number },
+    errorMessage: string | null = null,
+  ) {
+    try {
+      await fetch(`/api/scrape-runs/${runId}/finalize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status, counts, error_message: errorMessage }),
+      });
+    } catch {
+      // swallow — history finalize failure shouldn't fail the whole UX
+    }
+  }
+
   async function runGoogleScrape(req: ScrapeRequest) {
     setEvents([]);
     setRunning(true);
+    const runId = await createRun("google", req);
+    let hadError = false;
+    const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
+
     try {
       const totalCombos = req.cities.length * req.terms.length;
       let comboIdx = 0;
@@ -122,12 +163,20 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
             term,
             message: `Chunk ${comboIdx}/${totalCombos}: ${city} / ${term}`,
           });
-          await streamPost("/api/scrape", {
+          const last = await streamPost("/api/scrape", {
             city,
             term,
             skipExisting: req.skipExisting,
             rule: req.rule,
+            runId,
           });
+          if (last?.stage === "error") hadError = true;
+          if (last?.counts) {
+            totals.found += last.counts.found ?? 0;
+            totals.qualified += last.counts.qualified ?? 0;
+            totals.new += last.counts.new ?? 0;
+            totals.skipped += last.counts.skipped ?? 0;
+          }
         }
       }
 
@@ -138,11 +187,15 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         while (i++ < SAFETY_CAP) {
           const last = await streamPost("/api/scrape/enrich", { batchSize: 3 });
           if (!last) break;
-          if (last.stage === "error") break;
+          if (last.stage === "error") {
+            hadError = true;
+            break;
+          }
           const remaining = last.counts?.remaining ?? 0;
           if (remaining <= 0) break;
         }
         if (i >= SAFETY_CAP) {
+          hadError = true;
           append({
             stage: "error",
             message: `Hit safety cap (${SAFETY_CAP} batches). Stopping enrichment loop.`,
@@ -151,14 +204,24 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
       }
 
       append({ stage: "done", message: "Scrape complete." });
+    } catch (err) {
+      hadError = true;
+      append({ stage: "error", message: `Run failed: ${(err as Error).message}` });
     } finally {
       setRunning(false);
+      if (runId) {
+        await finalizeRun(runId, hadError ? "error" : "done", totals);
+      }
     }
   }
 
   async function runInstagramScrape(req: InstagramScrapeRequest) {
     setEvents([]);
     setRunning(true);
+    const runId = await createRun("instagram", req);
+    let hadError = false;
+    const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
+
     try {
       append({
         stage: "searching",
@@ -169,16 +232,30 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           stage: "searching",
           message: `Method: ${m.method} (${m.values.length} value${m.values.length === 1 ? "" : "s"})`,
         });
-        await streamPost("/api/scrape/discover-ig", {
+        const last = await streamPost("/api/scrape/discover-ig", {
           method: m.method,
           values: m.values,
           skipExisting: req.skipExisting,
           rule: req.rule,
+          runId,
         });
+        if (last?.stage === "error") hadError = true;
+        if (last?.counts) {
+          totals.found += last.counts.found ?? 0;
+          totals.qualified += last.counts.qualified ?? 0;
+          totals.new += last.counts.new ?? 0;
+          totals.skipped += last.counts.skipped ?? 0;
+        }
       }
       append({ stage: "done", message: "IG scrape complete." });
+    } catch (err) {
+      hadError = true;
+      append({ stage: "error", message: `Run failed: ${(err as Error).message}` });
     } finally {
       setRunning(false);
+      if (runId) {
+        await finalizeRun(runId, hadError ? "error" : "done", totals);
+      }
     }
   }
 
