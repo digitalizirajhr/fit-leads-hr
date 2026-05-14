@@ -132,6 +132,15 @@ export default async function HistoryDetailPage({ params }: PageProps) {
         <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {run.error_message}
         </p>
+      ) : run.status === "error" ? (
+        <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          This run was marked as errored but no specific message was captured.
+          Most likely cause: a network blip or Apify rejected the input
+          (e.g. private/non-existent username for a seed scrape, or quota
+          exceeded). Re-run with the same params and watch the live SSE log
+          on /scrape — it&apos;ll surface the real error in real time. Future
+          runs will save the message to this page automatically.
+        </p>
       ) : null}
 
       {leadsError ? (

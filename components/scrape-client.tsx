@@ -153,13 +153,16 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
    *
    * Returns true on success, false if any error happened.
    */
-  async function runEnrichmentPhase(rule: QualificationRule): Promise<boolean> {
+  async function runEnrichmentPhase(
+    rule: QualificationRule,
+  ): Promise<{ ok: boolean; errorMessage: string | null }> {
     // Outer cap protects against an infinite loop if a bug ever causes
     // /start to keep returning the same handles. 50 outer iterations ×
     // 1000 handles per Apify run = 50k max enrichments per scrape.
     const OUTER_CAP = 50;
     const INNER_POLL_RETRY_CAP = 30;
     let outerOk = true;
+    let lastErrorMessage: string | null = null;
 
     for (let outer = 0; outer < OUTER_CAP; outer++) {
       // Step 1: kick off Apify enrichment run.
@@ -174,11 +177,9 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         });
         if (!startResp.ok) {
           const txt = await startResp.text().catch(() => "");
-          append({
-            stage: "error",
-            message: `Failed to start enrich Apify run: ${startResp.status} ${txt || startResp.statusText}`,
-          });
-          return false;
+          const msg = `Failed to start enrich Apify run: ${startResp.status} ${txt || startResp.statusText}`;
+          append({ stage: "error", message: msg });
+          return { ok: false, errorMessage: msg };
         }
         const json = (await startResp.json()) as {
           apifyRunId: string | null;
@@ -191,17 +192,15 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
             stage: "done",
             message: `Enrichment complete — no more pending derivable handles (${json.totalPending} total pending in DB).`,
           });
-          return outerOk;
+          return { ok: outerOk, errorMessage: outerOk ? null : lastErrorMessage };
         }
         apifyRunId = json.apifyRunId;
         requestedHandles = json.requestedHandles;
         totalPending = json.totalPending;
       } catch (err) {
-        append({
-          stage: "error",
-          message: `Network error starting enrich: ${(err as Error).message}`,
-        });
-        return false;
+        const msg = `Network error starting enrich: ${(err as Error).message}`;
+        append({ stage: "error", message: msg });
+        return { ok: false, errorMessage: msg };
       }
 
       append({
@@ -223,6 +222,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         }
         if (last.stage === "error") {
           outerOk = false;
+          lastErrorMessage = last.message ?? lastErrorMessage;
           runFinished = true;
           break;
         }
@@ -234,19 +234,15 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         await new Promise((r) => setTimeout(r, 2000));
       }
       if (!runFinished) {
-        append({
-          stage: "error",
-          message: `Hit poll cap (${INNER_POLL_RETRY_CAP}) for enrich run ${apifyRunId.slice(0, 8)}.`,
-        });
-        return false;
+        const msg = `Hit poll cap (${INNER_POLL_RETRY_CAP}) for enrich run ${apifyRunId.slice(0, 8)}.`;
+        append({ stage: "error", message: msg });
+        return { ok: false, errorMessage: msg };
       }
     }
 
-    append({
-      stage: "error",
-      message: `Hit outer cap (${OUTER_CAP}) on enrichment phase. Run /scrape again to continue.`,
-    });
-    return false;
+    const msg = `Hit outer cap (${OUTER_CAP}) on enrichment phase. Run /scrape again to continue.`;
+    append({ stage: "error", message: msg });
+    return { ok: false, errorMessage: msg };
   }
 
   async function runGoogleScrape(req: ScrapeRequest) {
@@ -254,6 +250,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     setRunning(true);
     const runId = await createRun("google", req);
     let hadError = false;
+    let lastErrorMessage: string | null = null;
     const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
 
     try {
@@ -280,7 +277,10 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
             rule: req.rule,
             runId,
           });
-          if (last?.stage === "error") hadError = true;
+          if (last?.stage === "error") {
+            hadError = true;
+            lastErrorMessage = last.message ?? lastErrorMessage;
+          }
           if (last?.counts) {
             totals.found += last.counts.found ?? 0;
             totals.qualified += last.counts.qualified ?? 0;
@@ -292,18 +292,27 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
 
       if (req.enrichInstagram) {
         append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
-        const ok = await runEnrichmentPhase(req.rule);
-        if (!ok) hadError = true;
+        const result = await runEnrichmentPhase(req.rule);
+        if (!result.ok) {
+          hadError = true;
+          lastErrorMessage = result.errorMessage ?? lastErrorMessage;
+        }
       }
 
       append({ stage: "done", message: "Scrape complete." });
     } catch (err) {
       hadError = true;
-      append({ stage: "error", message: `Run failed: ${(err as Error).message}` });
+      lastErrorMessage = (err as Error).message;
+      append({ stage: "error", message: `Run failed: ${lastErrorMessage}` });
     } finally {
       setRunning(false);
       if (runId) {
-        await finalizeRun(runId, hadError ? "error" : "done", totals);
+        await finalizeRun(
+          runId,
+          hadError ? "error" : "done",
+          totals,
+          hadError ? lastErrorMessage : null,
+        );
       }
     }
   }
@@ -313,6 +322,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     setRunning(true);
     const runId = await createRun("instagram", req);
     let hadError = false;
+    let lastErrorMessage: string | null = null;
     const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
 
     try {
@@ -339,29 +349,26 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           });
           if (!startResp.ok) {
             const txt = await startResp.text().catch(() => "");
-            append({
-              stage: "error",
-              message: `Failed to start Apify run for ${m.method}: ${startResp.status} ${txt || startResp.statusText}`,
-            });
+            const msg = `Failed to start Apify run for ${m.method}: ${startResp.status} ${txt || startResp.statusText}`;
+            append({ stage: "error", message: msg });
             hadError = true;
+            lastErrorMessage = msg;
             continue;
           }
           const json = (await startResp.json()) as { apifyRunId?: string; error?: string };
           if (!json.apifyRunId) {
-            append({
-              stage: "error",
-              message: `No apifyRunId returned for ${m.method}: ${json.error ?? "unknown"}`,
-            });
+            const msg = `No apifyRunId returned for ${m.method}: ${json.error ?? "unknown"}`;
+            append({ stage: "error", message: msg });
             hadError = true;
+            lastErrorMessage = msg;
             continue;
           }
           apifyRunId = json.apifyRunId;
         } catch (err) {
-          append({
-            stage: "error",
-            message: `Network error starting ${m.method}: ${(err as Error).message}`,
-          });
+          const msg = `Network error starting ${m.method}: ${(err as Error).message}`;
+          append({ stage: "error", message: msg });
           hadError = true;
+          lastErrorMessage = msg;
           continue;
         }
 
@@ -387,6 +394,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           }
           if (last.stage === "error") {
             hadError = true;
+            lastErrorMessage = last.message ?? lastErrorMessage;
             methodFinished = true;
             break;
           }
@@ -405,11 +413,10 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           await new Promise((r) => setTimeout(r, 2000));
         }
         if (!methodFinished) {
-          append({
-            stage: "error",
-            message: `Hit poll retry cap (${POLL_RETRY_CAP}) for ${m.method}; Apify run still not finished.`,
-          });
+          const msg = `Hit poll retry cap (${POLL_RETRY_CAP}) for ${m.method}; Apify run still not finished.`;
+          append({ stage: "error", message: msg });
           hadError = true;
+          lastErrorMessage = msg;
         }
       }
 
@@ -420,17 +427,26 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         stage: "enriching",
         message: "Discovery done. Now enriching profiles + classifying coaches via async Apify run…",
       });
-      const ok = await runEnrichmentPhase(req.rule);
-      if (!ok) hadError = true;
+      const result = await runEnrichmentPhase(req.rule);
+      if (!result.ok) {
+        hadError = true;
+        lastErrorMessage = result.errorMessage ?? lastErrorMessage;
+      }
 
       append({ stage: "done", message: "IG scrape complete." });
     } catch (err) {
       hadError = true;
-      append({ stage: "error", message: `Run failed: ${(err as Error).message}` });
+      lastErrorMessage = (err as Error).message;
+      append({ stage: "error", message: `Run failed: ${lastErrorMessage}` });
     } finally {
       setRunning(false);
       if (runId) {
-        await finalizeRun(runId, hadError ? "error" : "done", totals);
+        await finalizeRun(
+          runId,
+          hadError ? "error" : "done",
+          totals,
+          hadError ? lastErrorMessage : null,
+        );
       }
     }
   }
