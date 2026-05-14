@@ -19,20 +19,40 @@ const ALLOWED_DOMAIN = "@digitaliziraj.hr";
 export async function middleware(req: NextRequest) {
   const path = req.nextUrl.pathname;
 
-  // Public allowlist.
+  // Public allowlist. Done FIRST so a misconfigured Supabase env var can't
+  // break the login page itself.
   if (path === "/login" || path.startsWith("/auth/")) {
     return NextResponse.next();
   }
 
+  // Fail loudly + safely if env vars are missing. Without these we can't
+  // verify a session, so we redirect to /login (with a marker) instead of
+  // throwing MIDDLEWARE_INVOCATION_FAILED for every request.
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!rawUrl || !anonKey) {
+    if (path.startsWith("/api/")) {
+      return NextResponse.json(
+        {
+          error:
+            "Server misconfigured: NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY missing on this deployment.",
+        },
+        { status: 500 },
+      );
+    }
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.searchParams.set("error", "config");
+    return NextResponse.redirect(url);
+  }
+
   // Build a response we can write cookies to (Supabase will refresh tokens).
   const response = NextResponse.next({ request: req });
-  const projectUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "")
-    .replace(/\/+$/, "")
-    .replace(/\/rest\/v1$/, "");
+  const projectUrl = rawUrl.replace(/\/+$/, "").replace(/\/rest\/v1$/, "");
 
   const supabase = createServerClient(
     projectUrl,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
+    anonKey,
     {
       cookies: {
         getAll: () => req.cookies.getAll(),

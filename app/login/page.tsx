@@ -52,7 +52,9 @@ function LoginInner() {
         ? "OAuth callback didn't include a code. Try again."
         : errorParam === "exchange"
           ? "Couldn't complete sign-in. Try again."
-          : oauthError;
+          : errorParam === "config"
+            ? "Server is misconfigured: Supabase env vars missing. Contact the maintainer."
+            : oauthError;
 
   return (
     <main className="mx-auto flex min-h-[80vh] max-w-md flex-col items-center justify-center gap-6 p-6 text-center">
