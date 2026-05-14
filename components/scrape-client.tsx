@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ScrapeForm, type ScrapeRequest } from "@/components/scrape-form";
 import { ScrapeProgress } from "@/components/scrape-progress";
-import type { ScrapeEvent } from "@/lib/types";
+import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 /**
  * Orchestrator for the chunked scrape pipeline.
@@ -25,11 +25,15 @@ import type { ScrapeEvent } from "@/lib/types";
  */
 interface ScrapeClientProps {
   initialCustomTerms: string[];
+  citiesInDb: string[];
 }
 
-export function ScrapeClient({ initialCustomTerms }: ScrapeClientProps) {
+export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientProps) {
   const [events, setEvents] = useState<ScrapeEvent[]>([]);
   const [running, setRunning] = useState(false);
+  // Per-scrape qualification rule. Defaults each visit (no persistence between
+  // scrapes — see 2026-05-14-rule-on-scrape-design.md).
+  const [rule, setRule] = useState<QualificationRule>(DEFAULT_RULE);
 
   function append(ev: ScrapeEvent) {
     setEvents((prev) => [...prev, ev]);
@@ -125,6 +129,7 @@ export function ScrapeClient({ initialCustomTerms }: ScrapeClientProps) {
             city,
             term,
             skipExisting: req.skipExisting,
+            rule: req.rule,
           });
         }
       }
@@ -165,6 +170,9 @@ export function ScrapeClient({ initialCustomTerms }: ScrapeClientProps) {
         onSubmit={runScrape}
         running={running}
         customTerms={initialCustomTerms}
+        rule={rule}
+        onRuleChange={setRule}
+        citiesInDb={citiesInDb}
       />
       <ScrapeProgress events={events} running={running} />
     </>

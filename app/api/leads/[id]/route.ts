@@ -6,7 +6,6 @@ import {
   type Lead,
   type LeadStatus,
   type OutreachEntry,
-  type QualificationRule,
 } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -103,7 +102,10 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   // 2. Apply qualified_override if supplied
   if (overrideToSet !== undefined) {
     if (overrideToSet === null) {
-      // Clearing the override → recompute `qualified` from current rule for this row.
+      // Clearing the override → recompute `qualified` against DEFAULT_RULE.
+      // There's no longer a persisted global rule (it lives per-scrape now);
+      // DEFAULT_RULE is a sensible fallback so the lead lands in a defined
+      // state instead of keeping stale data from whenever it was last scraped.
       const { data: row, error: rowErr } = await supabase
         .from("leads")
         .select(
@@ -114,16 +116,10 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
       if (rowErr) return NextResponse.json({ error: rowErr.message }, { status: 500 });
       if (!row) return NextResponse.json({ error: "Lead not found" }, { status: 404 });
 
-      const { data: settingsRow } = await supabase
-        .from("settings")
-        .select("qualification_rules")
-        .eq("id", "singleton")
-        .maybeSingle();
-      const rule: QualificationRule = {
-        ...DEFAULT_RULE,
-        ...((settingsRow?.qualification_rules as Partial<QualificationRule>) ?? {}),
-      };
-      const recomputedQualified = computeQualified(row as unknown as LeadForRule, rule);
+      const recomputedQualified = computeQualified(
+        row as unknown as LeadForRule,
+        DEFAULT_RULE,
+      );
 
       const { error } = await supabase
         .from("leads")

@@ -14,6 +14,8 @@ interface Body {
   city?: string;
   term?: string;
   skipExisting?: boolean;
+  /** Per-scrape qualification rule. If absent, falls back to DEFAULT_RULE. */
+  rule?: Partial<QualificationRule>;
 }
 
 /**
@@ -44,6 +46,9 @@ export async function POST(req: NextRequest) {
   const city = typeof body.city === "string" ? body.city.trim() : "";
   const term = typeof body.term === "string" ? body.term.trim() : "";
   const skipExisting = body.skipExisting !== false;
+  // Merge with defaults so older clients (or partial bodies) still produce a
+  // valid rule instead of crashing computeQualified on missing fields.
+  const rule: QualificationRule = { ...DEFAULT_RULE, ...(body.rule ?? {}) };
 
   if (!city || !term) {
     return new Response(
@@ -81,17 +86,6 @@ export async function POST(req: NextRequest) {
         }
 
         const supabase = getServerSupabase();
-
-        // ---- 2.5 Read the qualification rule (one query, used per-row below) ----
-        const { data: settingsRow } = await supabase
-          .from("settings")
-          .select("qualification_rules")
-          .eq("id", "singleton")
-          .maybeSingle();
-        const rule: QualificationRule = {
-          ...DEFAULT_RULE,
-          ...((settingsRow?.qualification_rules as Partial<QualificationRule>) ?? {}),
-        };
 
         // ---- 3. Skip existing place_ids in DB ----
         let candidates = deduped;

@@ -1,86 +1,46 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
+import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import type { QualificationRule } from "@/lib/types";
 
 interface Props {
-  initialRule: QualificationRule;
-  initialQualifiedCount: number;
-  cities: string[]; // distinct cities present in DB (for the city restriction picker)
+  rule: QualificationRule;
+  onChange: (next: QualificationRule) => void;
+  /** Cities to surface in the city-restriction picker. */
+  cities: string[];
 }
 
 /**
- * Qualification rule editor. Each criterion is a Toggle (boolean) or
- * ThresholdToggle (boolean + numeric threshold) or CityRestriction.
- *
- * Auto-saves on every change via PATCH /api/settings. Recompute is
- * a separate explicit button below.
+ * The 8 qualification-criteria controls. Parent-controlled — no internal
+ * state, no autosave, no API calls. The owner (e.g. the scrape form) decides
+ * what to do with the changes (typically: stash in component state and send
+ * along with the next scrape request).
  */
-export function SettingsForm({ initialRule, initialQualifiedCount, cities }: Props) {
-  const router = useRouter();
-  const [rule, setRule] = useState<QualificationRule>(initialRule);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [recomputeMsg, setRecomputeMsg] = useState<string | null>(null);
-  const [recomputing, setRecomputing] = useState(false);
-  const [, startTransition] = useTransition();
-
-  function commit(next: QualificationRule) {
-    setRule(next); // optimistic
-    startTransition(async () => {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rule: next }),
-      });
-      if (res.ok) {
-        setSavedAt(Date.now());
-        router.refresh();
-      }
-    });
-  }
-
-  async function recompute() {
-    setRecomputing(true);
-    setRecomputeMsg("Recomputing…");
-    const res = await fetch("/api/settings/recompute-qualified", { method: "POST" });
-    setRecomputing(false);
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setRecomputeMsg(`Failed: ${body.error ?? res.status}`);
-      return;
-    }
-    const out = (await res.json()) as { updated: number; qualified: number; unqualified: number };
-    setRecomputeMsg(`Done. ${out.qualified} qualified · ${out.unqualified} not · ${out.updated} reviewed.`);
-    router.refresh();
-  }
-
+export function QualificationRuleForm({ rule, onChange, cities }: Props) {
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <Toggle
         label="Require: no real website"
         hint="Lead's listed website is null, social-only, or unreachable."
         checked={rule.requireNoWebsite}
-        onChange={(v) => commit({ ...rule, requireNoWebsite: v })}
+        onChange={(v) => onChange({ ...rule, requireNoWebsite: v })}
       />
       <Toggle
         label="Require: has a phone number"
         hint="Without this you can't actually call them."
         checked={rule.requirePhone}
-        onChange={(v) => commit({ ...rule, requirePhone: v })}
+        onChange={(v) => onChange({ ...rule, requirePhone: v })}
       />
-
       <ThresholdToggle
         label="Min Google rating"
         hint="Filter out leads with poor or missing Google reviews."
         value={rule.minGoogleRating}
         placeholder="e.g. 4.0"
         step="0.1"
-        onChange={(v) => commit({ ...rule, minGoogleRating: v })}
+        onChange={(v) => onChange({ ...rule, minGoogleRating: v })}
       />
       <ThresholdToggle
         label="Min Google review count"
@@ -88,20 +48,19 @@ export function SettingsForm({ initialRule, initialQualifiedCount, cities }: Pro
         value={rule.minReviewCount}
         placeholder="e.g. 5"
         step="1"
-        onChange={(v) => commit({ ...rule, minReviewCount: v })}
+        onChange={(v) => onChange({ ...rule, minReviewCount: v })}
       />
-
       <Toggle
         label="Require: has Instagram handle"
         hint="At least an IG handle present (set by enrichment or a website that points to an IG profile)."
         checked={rule.requireInstagram}
-        onChange={(v) => commit({ ...rule, requireInstagram: v })}
+        onChange={(v) => onChange({ ...rule, requireInstagram: v })}
       />
       <Toggle
         label="Require: active on Instagram (last 30 days)"
         hint="Posted something recently — proxy for 'still in business'."
         checked={rule.requireActiveInstagram}
-        onChange={(v) => commit({ ...rule, requireActiveInstagram: v })}
+        onChange={(v) => onChange({ ...rule, requireActiveInstagram: v })}
       />
       <ThresholdToggle
         label="Min Instagram followers"
@@ -109,29 +68,13 @@ export function SettingsForm({ initialRule, initialQualifiedCount, cities }: Pro
         value={rule.minInstagramFollowers}
         placeholder="e.g. 500"
         step="1"
-        onChange={(v) => commit({ ...rule, minInstagramFollowers: v })}
+        onChange={(v) => onChange({ ...rule, minInstagramFollowers: v })}
       />
-
       <CityRestriction
         cities={cities}
         value={rule.allowedCities}
-        onChange={(v) => commit({ ...rule, allowedCities: v })}
+        onChange={(v) => onChange({ ...rule, allowedCities: v })}
       />
-
-      <div className="flex flex-wrap items-center gap-4 border-t border-border pt-4">
-        <Button onClick={recompute} disabled={recomputing}>
-          {recomputing
-            ? "Recomputing…"
-            : `Recompute qualified for ${initialQualifiedCount} lead${initialQualifiedCount === 1 ? "" : "s"}`}
-        </Button>
-        {recomputeMsg ? (
-          <span className="text-xs text-muted-foreground">{recomputeMsg}</span>
-        ) : savedAt ? (
-          <span className="text-xs text-muted-foreground">
-            Auto-saved {Math.max(0, Math.floor((Date.now() - savedAt) / 1000))}s ago
-          </span>
-        ) : null}
-      </div>
     </div>
   );
 }
@@ -174,7 +117,7 @@ function ThresholdToggle({
   onChange: (v: number | null) => void;
 }) {
   const enabled = value !== null;
-  // Local draft so we don't fire commit on every keystroke; commit on blur instead.
+  // Local draft so we don't fire onChange on every keystroke; commit on blur.
   const [draft, setDraft] = useState(value?.toString() ?? "");
 
   return (
@@ -229,9 +172,9 @@ function CityRestriction({
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex-1">
-        <Label className="text-sm">Restrict to specific cities</Label>
+        <Label className="text-sm">Restrict qualified to specific cities</Label>
         <p className="text-xs text-muted-foreground">
-          Tick the cities you want to focus on. Untick the switch to disable the restriction entirely.
+          Tick the cities you want qualified leads in. Untick the switch to disable the restriction.
         </p>
         {enabled ? (
           cities.length === 0 ? (

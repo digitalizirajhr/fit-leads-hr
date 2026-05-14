@@ -6,6 +6,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { CustomTermsManager } from "@/components/custom-terms-manager";
+import { QualificationRuleForm } from "@/components/qualification-rule-form";
+import type { QualificationRule } from "@/lib/types";
 
 const CITIES = [
   "Zagreb", "Split", "Rijeka", "Osijek", "Zadar",
@@ -28,21 +30,38 @@ export interface ScrapeRequest {
   terms: string[];
   enrichInstagram: boolean;
   skipExisting: boolean;
+  /** Per-scrape qualification rule. Sent in each chunk's POST body so /api/scrape
+   *  doesn't need to consult any global state. */
+  rule: QualificationRule;
 }
 
 interface Props {
   onSubmit: (req: ScrapeRequest) => void;
   running: boolean;
   customTerms: string[];
+  /** Owned by the parent so reload doesn't accidentally lose form state via
+   *  this component re-mount; here it just renders + reports changes back. */
+  rule: QualificationRule;
+  onRuleChange: (next: QualificationRule) => void;
+  /** Distinct cities currently in the DB — drives the city-restriction picker
+   *  inside the qualification rule form. */
+  citiesInDb: string[];
 }
 
-export function ScrapeForm({ onSubmit, running, customTerms }: Props) {
+export function ScrapeForm({
+  onSubmit,
+  running,
+  customTerms,
+  rule,
+  onRuleChange,
+  citiesInDb,
+}: Props) {
   const [selectedCities, setSelectedCities] = useState<Set<string>>(new Set());
   const [selectedTerms, setSelectedTerms] = useState<Set<string>>(new Set());
   const [enrichInstagram, setEnrichInstagram] = useState(false);
   const [skipExisting, setSkipExisting] = useState(true);
 
-  // Defaults + Igor's custom terms (managed via /settings, also editable inline below).
+  // Defaults + Igor's custom terms (managed inline in the term section below).
   const ALL_TERMS = [...TERMS, ...customTerms];
 
   function toggleSet<T>(set: Set<T>, value: T): Set<T> {
@@ -61,6 +80,7 @@ export function ScrapeForm({ onSubmit, running, customTerms }: Props) {
       terms: Array.from(selectedTerms),
       enrichInstagram,
       skipExisting,
+      rule,
     });
   }
 
@@ -115,10 +135,20 @@ export function ScrapeForm({ onSubmit, running, customTerms }: Props) {
 
         <div className="mt-4 border-t border-border pt-3">
           <p className="mb-2 text-xs text-muted-foreground">
-            Add a custom term — saves to settings, appears here next time too.
+            Add a custom term — saved persistently, appears here next time too.
           </p>
           <CustomTermsManager initialTerms={customTerms} />
         </div>
+      </Section>
+
+      {/* Qualification rule — applied per-scrape, does not persist */}
+      <Section
+        title="Qualification criteria"
+        actions={
+          <span className="text-xs text-muted-foreground">resets on reload</span>
+        }
+      >
+        <QualificationRuleForm rule={rule} onChange={onRuleChange} cities={citiesInDb} />
       </Section>
 
       {/* Toggles */}
