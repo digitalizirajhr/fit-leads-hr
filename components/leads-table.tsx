@@ -13,6 +13,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { ExportDialog } from "@/components/export-dialog";
 import { StatusSelect } from "@/components/status-select";
 import { PriorityStars } from "@/components/priority-stars";
 import { croatianSort, formatRelativeTime, truncateUrl } from "@/lib/format";
@@ -151,9 +152,7 @@ export function LeadsTable({ leads }: Props) {
 
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>{selected.size > 0 ? `${selected.size} selected` : ""}</span>
-        <Button variant="outline" size="sm" disabled={selected.size === 0}>
-          {selected.size > 0 ? `Export selected (${selected.size})` : "Export selected"}
-        </Button>
+        <ExportDialog selectedIds={Array.from(selected)} />
       </div>
     </div>
   );
