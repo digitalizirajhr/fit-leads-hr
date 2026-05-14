@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { finalizeScrapeRun } from "@/lib/scrape-runs";
+import { requireAuth } from "@/lib/require-auth";
+import { rejectCrossSiteMutation } from "@/lib/request-guards";
 import type { ScrapeCounts, ScrapeRunStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -13,6 +15,11 @@ const VALID_STATUSES: ScrapeRunStatus[] = ["done", "error"];
 
 /** POST /api/scrape-runs/:id/finalize → set ended_at + status + counts. */
 export async function POST(req: NextRequest, { params }: Ctx) {
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+  const blocked = rejectCrossSiteMutation(req);
+  if (blocked) return blocked;
+
   const { id } = await params;
   const body = await req.json().catch(() => ({}));
 

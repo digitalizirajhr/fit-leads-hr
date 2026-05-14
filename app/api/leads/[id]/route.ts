@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
-import { computeQualified, type LeadForRule } from "@/lib/qualification";
+import {
+  computeQualified,
+  qualificationRuleFromParams,
+  type LeadForRule,
+} from "@/lib/qualification";
+import { rejectCrossSiteMutation } from "@/lib/request-guards";
 import {
   DEFAULT_RULE,
   type Lead,
@@ -17,6 +22,27 @@ const ALLOWED_STATUSES: LeadStatus[] = [
 
 interface Ctx {
   params: Promise<{ id: string }>;
+}
+
+function normalizeRunJoin(rows: Array<{ scrape_runs: unknown }> | null) {
+  const out: Array<{ params?: unknown; started_at?: string }> = [];
+  for (const row of rows ?? []) {
+    const value = row.scrape_runs;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      out.push(value as { params?: unknown; started_at?: string });
+    } else if (Array.isArray(value)) {
+      for (const run of value) {
+        if (run && typeof run === "object") {
+          out.push(run as { params?: unknown; started_at?: string });
+        }
+      }
+    }
+  }
+  return out.sort((a, b) => {
+    const at = a.started_at ? new Date(a.started_at).getTime() : 0;
+    const bt = b.started_at ? new Date(b.started_at).getTime() : 0;
+    return bt - at;
+  });
 }
 
 // GET /api/leads/:id  →  { lead, outreach }
@@ -55,6 +81,9 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
 //   true  → force qualified = true
 //   false → force qualified = false
 export async function PATCH(req: NextRequest, { params }: Ctx) {
+  const blocked = rejectCrossSiteMutation(req);
+  if (blocked) return blocked;
+
   const { id } = await params;
   const body = await req.json().catch(() => ({}));
 
@@ -68,6 +97,12 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
     patch.status = body.status as LeadStatus;
   }
   if (typeof body.notes === "string" || body.notes === null) {
+    if (typeof body.notes === "string" && body.notes.length > 5000) {
+      return NextResponse.json(
+        { error: "notes cannot exceed 5000 characters" },
+        { status: 400 },
+      );
+    }
     patch.notes = body.notes;
   }
   if (typeof body.priority === "number") {
@@ -118,7 +153,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
 
       const recomputedQualified = computeQualified(
         row as unknown as LeadForRule,
-        DEFAULT_RULE,
+        await getLatestRuleForLead(supabase, id),
       );
 
       const { error } = await supabase
@@ -146,4 +181,27 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   if (!latest) return NextResponse.json({ error: "Lead not found" }, { status: 404 });
 
   return NextResponse.json(latest as Lead);
+}
+
+async function getLatestRuleForLead(
+  supabase: ReturnType<typeof getServerSupabase>,
+  leadId: string,
+) {
+  const { data, error } = await supabase
+    .from("scrape_run_leads")
+    .select("scrape_runs(params, started_at)")
+    .eq("lead_id", leadId)
+    .limit(20);
+
+  if (error) {
+    console.warn(`getLatestRuleForLead: ${error.message}`);
+    return DEFAULT_RULE;
+  }
+
+  const runs = normalizeRunJoin((data ?? []) as Array<{ scrape_runs: unknown }>);
+  for (const run of runs) {
+    const rule = qualificationRuleFromParams(run.params);
+    if (rule) return rule;
+  }
+  return DEFAULT_RULE;
 }

@@ -55,7 +55,7 @@ export function LeadsFilters({ cities, shownCount, totalCount }: Props) {
   // 350ms debounce: when an input settles, push it to the URL.
   useEffect(() => {
     const id = setTimeout(() => {
-      const next = new URLSearchParams(sp.toString());
+      const next = new URLSearchParams(window.location.search);
       const sync = (key: string, val: string) => {
         if (val) next.set(key, val);
         else next.delete(key);
@@ -64,17 +64,18 @@ export function LeadsFilters({ cities, shownCount, totalCount }: Props) {
       sync("minRating", minRating);
       sync("minReviews", minReviews);
       sync("minFollowers", minFollowers);
+      next.delete("page");
       const qs = next.toString();
       router.push(qs ? `/leads?${qs}` : "/leads");
     }, 350);
     return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, minRating, minReviews, minFollowers]);
+  }, [router, search, minRating, minReviews, minFollowers]);
 
   function setParam(key: string, value: string | null) {
     const next = new URLSearchParams(sp.toString());
     if (value === null || value === "" || value === ALL) next.delete(key);
     else next.set(key, value);
+    next.delete("page");
     const qs = next.toString();
     router.push(qs ? `/leads?${qs}` : "/leads");
   }

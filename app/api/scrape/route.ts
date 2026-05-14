@@ -2,10 +2,11 @@ import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { searchPlaces, type RawPlace } from "@/lib/places";
 import { checkWebsitesParallel } from "@/lib/website-check";
-import { computeQualified } from "@/lib/qualification";
+import { computeQualified, normalizeQualificationRule } from "@/lib/qualification";
 import { requireAuth } from "@/lib/require-auth";
 import { linkLeadsToRun } from "@/lib/scrape-runs";
-import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
+import { rejectCrossSiteMutation } from "@/lib/request-guards";
+import type { QualificationRule, ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
 // 60s is the Hobby+Pro default. Each chunk = ONE (city, term), well under
@@ -41,6 +42,8 @@ export async function POST(req: NextRequest) {
   // Inline auth (middleware skips this route to avoid breaking SSE).
   const auth = await requireAuth();
   if (!auth.ok) return auth.response;
+  const blocked = rejectCrossSiteMutation(req);
+  if (blocked) return blocked;
 
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
@@ -56,12 +59,18 @@ export async function POST(req: NextRequest) {
   const skipExisting = body.skipExisting !== false;
   // Merge with defaults so older clients (or partial bodies) still produce a
   // valid rule instead of crashing computeQualified on missing fields.
-  const rule: QualificationRule = { ...DEFAULT_RULE, ...(body.rule ?? {}) };
+  const rule: QualificationRule = normalizeQualificationRule(body.rule);
   const runId = typeof body.runId === "string" ? body.runId : null;
 
   if (!city || !term) {
     return new Response(
       JSON.stringify({ error: "city and term are required" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (city.length > 100 || term.length > 100) {
+    return new Response(
+      JSON.stringify({ error: "city and term cannot exceed 100 characters" }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -110,14 +119,18 @@ export async function POST(req: NextRequest) {
           skippedExisting = deduped.length - candidates.length;
         }
 
-        // ---- 4. Drop rows without a phone ----
+        // ---- 4. Drop rows without a phone only when the rule requires one ----
         const beforePhone = candidates.length;
-        candidates = candidates.filter((p) => p.phone && p.phone.trim().length > 0);
+        if (rule.requirePhone) {
+          candidates = candidates.filter((p) => p.phone && p.phone.trim().length > 0);
+        }
         send({
           stage: "filtering",
           city,
           term,
-          message: `${candidates.length}/${beforePhone} have phone, ${skippedExisting} already in DB`,
+          message: rule.requirePhone
+            ? `${candidates.length}/${beforePhone} have phone, ${skippedExisting} already in DB`
+            : `${candidates.length}/${beforePhone} kept (phone not required), ${skippedExisting} already in DB`,
         });
 
         if (candidates.length === 0) {
@@ -157,10 +170,7 @@ export async function POST(req: NextRequest) {
               phone: p.phone,
               google_rating: p.google_rating,
               google_review_count: p.google_review_count,
-              // IG fields aren't enriched yet at scrape time — passed as nulls.
-              // The IG-enrich endpoint will recompute via /api/settings/recompute-qualified
-              // if you want enriched-aware qualification (or just hit the recompute
-              // button manually after enrichment).
+              // IG fields are enriched later by the run-scoped enrichment phase.
               instagram_handle: null,
               instagram_is_active: null,
               instagram_followers: null,

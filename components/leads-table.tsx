@@ -41,6 +41,10 @@ export function LeadsTable({ leads }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("priority");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
+  const visibleSelectedIds = leads
+    .filter((lead) => selected.has(lead.id))
+    .map((lead) => lead.id);
+
   const allOnPageSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
 
   function toggleRow(id: string) {
@@ -153,8 +157,8 @@ export function LeadsTable({ leads }: Props) {
       </div>
 
       <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>{selected.size > 0 ? `${selected.size} selected` : ""}</span>
-        <ExportDialog selectedIds={Array.from(selected)} />
+        <span>{visibleSelectedIds.length > 0 ? `${visibleSelectedIds.length} selected` : ""}</span>
+        <ExportDialog selectedIds={visibleSelectedIds} />
       </div>
     </div>
   );
@@ -194,6 +198,8 @@ function LeadRow({
   selected: boolean;
   onToggle: () => void;
 }) {
+  const websiteHref = safeExternalHref(lead.current_website);
+
   return (
     <TableRow data-state={selected ? "selected" : undefined}>
       <TableCell>
@@ -227,14 +233,14 @@ function LeadRow({
         )}
       </TableCell>
       <TableCell>
-        {lead.current_website ? (
+        {websiteHref ? (
           <a
-            href={lead.current_website}
+            href={websiteHref}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs hover:underline underline-offset-4"
           >
-            {truncateUrl(lead.current_website)}
+            {truncateUrl(websiteHref)}
           </a>
         ) : (
           <Badge variant="destructive" className="font-normal">
@@ -279,4 +285,16 @@ function LeadRow({
       </TableCell>
     </TableRow>
   );
+}
+
+function safeExternalHref(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const href = /^[a-z][a-z\d+.-]*:/i.test(value) ? value : `https://${value}`;
+    const url = new URL(href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

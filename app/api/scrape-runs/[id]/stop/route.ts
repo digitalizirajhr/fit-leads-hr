@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
+import { requireAuth } from "@/lib/require-auth";
+import { computeScrapeRunCounts } from "@/lib/scrape-runs";
+import { rejectCrossSiteMutation } from "@/lib/request-guards";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +22,11 @@ interface Ctx {
  * one Apify poll cycle.
  */
 export async function POST(_req: NextRequest, { params }: Ctx) {
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+  const blocked = rejectCrossSiteMutation(_req);
+  if (blocked) return blocked;
+
   const { id } = await params;
   const supabase = getServerSupabase();
 
@@ -39,28 +47,19 @@ export async function POST(_req: NextRequest, { params }: Ctx) {
     return new NextResponse(null, { status: 204 });
   }
 
-  // Best-effort count of what got linked before the stop.
-  const { count: totalLinks } = await supabase
-    .from("scrape_run_leads")
-    .select("*", { count: "exact", head: true })
-    .eq("run_id", id);
-  const { count: qualifiedLinks } = await supabase
-    .from("scrape_run_leads")
-    .select("leads!inner(qualified)", { count: "exact", head: true })
-    .eq("run_id", id)
-    .eq("leads.qualified", true);
+  let counts;
+  try {
+    counts = await computeScrapeRunCounts(id);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+  }
 
   const { error: updateErr } = await supabase
     .from("scrape_runs")
     .update({
       status: "error",
       ended_at: new Date().toISOString(),
-      counts: {
-        found: totalLinks ?? 0,
-        qualified: qualifiedLinks ?? 0,
-        new: totalLinks ?? 0,
-        skipped: 0,
-      },
+      counts,
       error_message: "Force-stopped by user",
     })
     .eq("id", id);

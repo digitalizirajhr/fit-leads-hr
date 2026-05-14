@@ -32,7 +32,10 @@ const CSV_COLUMNS: ReadonlyArray<{ key: keyof Lead; header: string }> = [
 /** RFC-4180-ish CSV cell escaping: quote anything containing , " or newline. */
 function escapeCell(value: unknown): string {
   if (value === null || value === undefined) return "";
-  const s = typeof value === "string" ? value : String(value);
+  let s = typeof value === "string" ? value : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
   if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
     return `"${s.replace(/"/g, '""')}"`;
   }

@@ -81,14 +81,16 @@ export default async function HistoryDetailPage({ params }: PageProps) {
   }
 
   const storedCounts = run.counts ?? {};
-  // Compute live qualified count from the actual joined leads — the
-  // run.counts.qualified value is set at discovery-finalize time (before
-  // enrichment runs), so it's almost always 0 for IG runs even after
-  // enrichment marked dozens of leads as qualified.
+  // Prefer live linked-lead counts for history correctness. Stored counts from
+  // older runs can be stale because finalization used to trust browser totals.
+  const liveLinked = leads.length;
   const liveQualified = leads.filter((l) => l.qualified).length;
   const c = {
     ...storedCounts,
+    found: liveLinked,
+    new: liveLinked,
     qualified: liveQualified,
+    skipped: storedCounts.skipped ?? 0,
   };
 
   return (

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
+import { readStringArray, rejectCrossSiteMutation } from "@/lib/request-guards";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,21 +35,22 @@ export async function GET() {
 
 // PATCH → update custom_terms (any other body fields silently ignored).
 export async function PATCH(req: NextRequest) {
+  const blocked = rejectCrossSiteMutation(req);
+  if (blocked) return blocked;
+
   const body = await req.json().catch(() => ({}));
 
-  if (!Array.isArray(body.customTerms)) {
-    return NextResponse.json(
-      { error: "Body must include a 'customTerms' string array." },
-      { status: 400 },
-    );
-  }
+  const parsedTerms = readStringArray(body.customTerms, {
+    field: "customTerms",
+    maxItems: 200,
+    maxLength: 80,
+  });
+  if (!parsedTerms.ok) return parsedTerms.response;
 
   // Trim, drop empties, dedupe (case-sensitive — "yoga" vs "Yoga" stay distinct).
   const seen = new Set<string>();
   const cleaned: string[] = [];
-  for (const t of body.customTerms as unknown[]) {
-    if (typeof t !== "string") continue;
-    const trimmed = t.trim();
+  for (const trimmed of parsedTerms.value) {
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
     cleaned.push(trimmed);

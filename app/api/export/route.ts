@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { toCsv, toJson, exportFilename } from "@/lib/export";
+import { readStringArray, rejectCrossSiteMutation } from "@/lib/request-guards";
 import type { Lead } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -15,11 +16,20 @@ export const dynamic = "force-dynamic";
  * had cached when the user ticked the checkboxes).
  */
 export async function POST(req: NextRequest) {
+  const blocked = rejectCrossSiteMutation(req);
+  if (blocked) return blocked;
+
   const body = await req.json().catch(() => ({}));
   const ids: unknown = body.leadIds;
   const format: unknown = body.format;
 
-  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === "string")) {
+  const parsedIds = readStringArray(ids, {
+    field: "leadIds",
+    maxItems: 1000,
+    maxLength: 80,
+  });
+  if (!parsedIds.ok) return parsedIds.response;
+  if (parsedIds.value.length === 0) {
     return NextResponse.json(
       { error: "leadIds must be a non-empty array of strings" },
       { status: 400 },
@@ -33,7 +43,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from("leads")
     .select("*")
-    .in("id", ids as string[]);
+    .in("id", parsedIds.value);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const leads = (data ?? []) as Lead[];

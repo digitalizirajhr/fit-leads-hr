@@ -1,4 +1,4 @@
-import type { Lead, QualificationRule } from "@/lib/types";
+import { DEFAULT_RULE, type Lead, type QualificationRule } from "@/lib/types";
 
 /**
  * Subset of Lead fields the rule reads. Used by the recompute endpoint to
@@ -17,6 +17,84 @@ export type LeadForRule = Pick<
   | "instagram_followers"
   | "city"
 >;
+
+function finiteNumberOrNull(value: unknown, fallback: number | null): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return value;
+}
+
+function nonNegativeIntegerOrNull(
+  value: unknown,
+  fallback: number | null,
+): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const int = Math.trunc(value);
+  return int >= 0 ? int : fallback;
+}
+
+/**
+ * Normalize untrusted JSON into a complete qualification rule. Request bodies
+ * and stored run params are user-controlled data, so callers should never
+ * spread them directly over DEFAULT_RULE.
+ */
+export function normalizeQualificationRule(
+  input: unknown,
+  fallback: QualificationRule = DEFAULT_RULE,
+): QualificationRule {
+  const src =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const minGoogleRating = finiteNumberOrNull(
+    src.minGoogleRating,
+    fallback.minGoogleRating,
+  );
+
+  return {
+    requireNoWebsite:
+      typeof src.requireNoWebsite === "boolean"
+        ? src.requireNoWebsite
+        : fallback.requireNoWebsite,
+    requirePhone:
+      typeof src.requirePhone === "boolean" ? src.requirePhone : fallback.requirePhone,
+    minGoogleRating:
+      minGoogleRating === null ? null : Math.min(5, Math.max(0, minGoogleRating)),
+    minReviewCount: nonNegativeIntegerOrNull(
+      src.minReviewCount,
+      fallback.minReviewCount,
+    ),
+    requireInstagram:
+      typeof src.requireInstagram === "boolean"
+        ? src.requireInstagram
+        : fallback.requireInstagram,
+    requireActiveInstagram:
+      typeof src.requireActiveInstagram === "boolean"
+        ? src.requireActiveInstagram
+        : fallback.requireActiveInstagram,
+    minInstagramFollowers: nonNegativeIntegerOrNull(
+      src.minInstagramFollowers,
+      fallback.minInstagramFollowers,
+    ),
+    allowedCities: Array.isArray(src.allowedCities)
+      ? src.allowedCities
+          .filter((city): city is string => typeof city === "string")
+          .map((city) => city.trim())
+          .filter(Boolean)
+      : src.allowedCities === null
+        ? null
+        : fallback.allowedCities,
+  };
+}
+
+export function qualificationRuleFromParams(params: unknown): QualificationRule {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return DEFAULT_RULE;
+  }
+  return normalizeQualificationRule((params as Record<string, unknown>).rule);
+}
 
 /**
  * Pure function — given a lead's fields and a rule, returns whether the lead

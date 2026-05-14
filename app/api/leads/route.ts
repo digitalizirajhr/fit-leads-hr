@@ -15,8 +15,18 @@ export const dynamic = "force-dynamic";
 //
 // Sort is fixed: priority DESC, then most recent first.
 
+function boundedInt(value: string | null, fallback: number, min: number, max: number) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
 export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
+  const page = boundedInt(sp.get("page"), 1, 1, 10000);
+  const pageSize = boundedInt(sp.get("pageSize"), 100, 25, 200);
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
 
   const city = sp.get("city");
   const status = sp.get("status");
@@ -25,7 +35,7 @@ export async function GET(req: NextRequest) {
   const noWebsiteParam = sp.get("noWebsite"); // "true" or null
 
   const supabase = getServerSupabase();
-  let q = supabase.from("leads").select("*");
+  let q = supabase.from("leads").select("*", { count: "exact" });
 
   if (city) q = q.eq("city", city);
   if (status) q = q.eq("status", status as LeadStatus);
@@ -50,12 +60,20 @@ export async function GET(req: NextRequest) {
   const minFollowersNum = parseInt(sp.get("minFollowers") ?? "", 10);
   if (Number.isFinite(minFollowersNum)) q = q.gte("instagram_followers", minFollowersNum);
 
-  q = q.order("priority", { ascending: false }).order("created_at", { ascending: false });
+  q = q
+    .order("priority", { ascending: false })
+    .order("created_at", { ascending: false })
+    .range(from, to);
 
-  const { data, error } = await q;
+  const { data, error, count } = await q;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json(data as Lead[]);
+  return NextResponse.json({
+    leads: data as Lead[],
+    page,
+    pageSize,
+    total: count ?? 0,
+  });
 }

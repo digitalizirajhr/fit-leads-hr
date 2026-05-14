@@ -18,14 +18,14 @@ export function NotesEditor({ leadId, initial }: Props) {
   const router = useRouter();
   const [value, setValue] = useState(initial ?? "");
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [saving, setSaving] = useState(false);
   const lastSaved = useRef(initial ?? "");
 
   // Tick every 5s so the "Saved Xs ago" label refreshes.
-  const [, forceTick] = useState(0);
   useEffect(() => {
     if (savedAt === null) return;
-    const id = setInterval(() => forceTick((n) => n + 1), 5000);
+    const id = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(id);
   }, [savedAt]);
 
@@ -40,7 +40,9 @@ export function NotesEditor({ leadId, initial }: Props) {
     setSaving(false);
     if (!res.ok) return;
     lastSaved.current = value;
-    setSavedAt(Date.now());
+    const saved = Date.now();
+    setSavedAt(saved);
+    setNow(saved);
     router.refresh();
   }
 
@@ -57,7 +59,7 @@ export function NotesEditor({ leadId, initial }: Props) {
         {saving
           ? "Saving…"
           : savedAt
-            ? `Saved ${Math.max(0, Math.floor((Date.now() - savedAt) / 1000))}s ago`
+            ? `Saved ${Math.max(0, Math.floor((now - savedAt) / 1000))}s ago`
             : ""}
       </p>
     </div>

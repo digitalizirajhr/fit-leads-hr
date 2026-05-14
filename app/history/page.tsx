@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getServerSupabase } from "@/lib/supabase-server";
-import { janitorFinalizeStaleRuns } from "@/lib/scrape-runs";
+import { withComputedRunCounts } from "@/lib/scrape-runs";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -37,11 +37,6 @@ function summariseParams(run: ScrapeRun): string {
 }
 
 export default async function HistoryPage() {
-  // Catch abandoned runs (browser tab closed mid-orchestration) before we
-  // render. Runs older than 10 min still marked 'running' get auto-finalized
-  // to status='error' with whatever counts we can compute from linked leads.
-  await janitorFinalizeStaleRuns(10);
-
   const supabase = getServerSupabase();
   const { data, error } = await supabase
     .from("scrape_runs")
@@ -57,7 +52,7 @@ export default async function HistoryPage() {
     );
   }
 
-  const runs = (data ?? []) as ScrapeRun[];
+  const runs = await withComputedRunCounts((data ?? []) as ScrapeRun[]);
 
   return (
     <main className="mx-auto max-w-screen-2xl space-y-4 p-6">

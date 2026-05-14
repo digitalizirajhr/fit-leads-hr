@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
+import { requireAuth } from "@/lib/require-auth";
+import { computeScrapeRunCounts } from "@/lib/scrape-runs";
 import type { Lead, ScrapeRun, ScrapeRunWithLeads } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -11,6 +13,9 @@ interface Ctx {
 
 /** GET /api/scrape-runs/:id → { run, leads } */
 export async function GET(_req: NextRequest, { params }: Ctx) {
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+
   const { id } = await params;
   const supabase = getServerSupabase();
 
@@ -59,6 +64,8 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
 
-  const out: ScrapeRunWithLeads = { run: runRes.data as ScrapeRun, leads };
+  const run = runRes.data as ScrapeRun;
+  run.counts = await computeScrapeRunCounts(id).catch(() => run.counts ?? {});
+  const out: ScrapeRunWithLeads = { run, leads };
   return NextResponse.json(out);
 }

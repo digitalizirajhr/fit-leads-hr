@@ -9,12 +9,14 @@
 // Concurrency: limit HEAD requests to 10 in flight so a 200-lead scrape
 // doesn't fan out 200 simultaneous sockets (slow for us, rude to the host).
 
-const SOCIAL_HOST_FRAGMENTS = [
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
+const SOCIAL_HOSTS = [
   "facebook.com",
   "instagram.com",
   "linktr.ee",
   "linkin.bio",
-  "linktree",
   "bento.me",
 ];
 
@@ -22,8 +24,76 @@ const HEAD_TIMEOUT_MS = 5_000;
 const DEFAULT_CONCURRENCY = 10;
 
 export function isSocialOnly(url: string): boolean {
-  const lower = url.toLowerCase();
-  return SOCIAL_HOST_FRAGMENTS.some((frag) => lower.includes(frag));
+  const parsed = parseHttpUrl(url);
+  if (!parsed) return false;
+  const host = parsed.hostname.toLowerCase();
+  return SOCIAL_HOSTS.some((socialHost) => {
+    return host === socialHost || host.endsWith(`.${socialHost}`);
+  });
+}
+
+function parseHttpUrl(raw: string | null | undefined): URL | null {
+  if (!raw || raw.trim().length === 0) return null;
+  const trimmed = raw.trim();
+  const withProtocol = /^[a-z][a-z\d+.-]*:/i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+  try {
+    const url = new URL(withProtocol);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateIpv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+function isPrivateIpv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower === "::" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:") ||
+    lower.startsWith("::ffff:10.") ||
+    lower.startsWith("::ffff:127.") ||
+    lower.startsWith("::ffff:192.168.")
+  );
+}
+
+async function isSafeExternalUrl(url: URL): Promise<boolean> {
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+
+  const directIp = isIP(host);
+  if (directIp === 4) return !isPrivateIpv4(host);
+  if (directIp === 6) return !isPrivateIpv6(host);
+
+  try {
+    const addresses = await lookup(host, { all: true, verbatim: true });
+    return addresses.every((address) => {
+      if (address.family === 4) return !isPrivateIpv4(address.address);
+      if (address.family === 6) return !isPrivateIpv6(address.address);
+      return false;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -31,11 +101,13 @@ export function isSocialOnly(url: string): boolean {
  * Never throws — failures and timeouts collapse to `false`.
  */
 export async function checkWebsite(url: string | null | undefined): Promise<boolean> {
-  if (!url || url.trim().length === 0) return false;
-  if (isSocialOnly(url)) return false;
+  const parsed = parseHttpUrl(url);
+  if (!parsed) return false;
+  if (isSocialOnly(parsed.toString())) return false;
+  if (!(await isSafeExternalUrl(parsed))) return false;
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch(parsed, {
       method: "HEAD",
       signal: AbortSignal.timeout(HEAD_TIMEOUT_MS),
       redirect: "follow",
@@ -45,7 +117,7 @@ export async function checkWebsite(url: string | null | undefined): Promise<bool
     // Some servers reject HEAD with 405 or hang. Try a small GET as fallback —
     // we set Range: bytes=0-0 so we don't actually download the body.
     try {
-      const res = await fetch(url, {
+      const res = await fetch(parsed, {
         method: "GET",
         signal: AbortSignal.timeout(HEAD_TIMEOUT_MS),
         redirect: "follow",

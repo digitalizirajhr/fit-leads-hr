@@ -14,9 +14,9 @@ const ALLOWED_DOMAIN = "@digitaliziraj.hr";
  *
  * The domain re-check here is defense in depth — /auth/callback already
  * enforces it on first sign-in. If a session somehow exists for the wrong
- * domain (e.g. cookie crafted manually), middleware also blocks.
+ * domain (e.g. cookie crafted manually), proxy also blocks.
  */
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const path = req.nextUrl.pathname;
 
   // Public allowlist. Done FIRST so a misconfigured Supabase env var can't
@@ -27,7 +27,7 @@ export async function middleware(req: NextRequest) {
 
   // Fail loudly + safely if env vars are missing. Without these we can't
   // verify a session, so we redirect to /login (with a marker) instead of
-  // throwing MIDDLEWARE_INVOCATION_FAILED for every request.
+  // throwing proxy invocation failures for every request.
   const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!rawUrl || !anonKey) {
@@ -87,12 +87,10 @@ export async function middleware(req: NextRequest) {
   return response;
 }
 
-// Skip middleware for Next.js internals, static assets, AND the SSE-streaming
-// routes (which do their own inline auth check at the top — middleware's
-// NextResponse.next() wrapping interferes with the streaming response and
-// breaks the pipe to the client).
+// Skip proxy for Next.js internals, static assets, AND the SSE-streaming
+// routes (which do their own inline auth check at the top).
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|api/scrape).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/scrape(?:/|$)).*)",
   ],
 };

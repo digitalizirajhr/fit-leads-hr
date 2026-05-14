@@ -19,7 +19,15 @@ interface PageProps {
     minRating?: string;
     minReviews?: string;
     minFollowers?: string;
+    page?: string;
+    pageSize?: string;
   }>;
+}
+
+function boundedInt(value: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 /**
@@ -39,9 +47,13 @@ interface PageProps {
 export default async function LeadsPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const supabase = getServerSupabase();
+  const page = boundedInt(params.page, 1, 1, 10000);
+  const pageSize = boundedInt(params.pageSize, 100, 25, 200);
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
 
   // Build the filtered query
-  let q = supabase.from("leads").select("*");
+  let q = supabase.from("leads").select("*", { count: "exact" });
 
   if (params.city) q = q.eq("city", params.city);
   if (params.status) q = q.eq("status", params.status as LeadStatus);
@@ -66,9 +78,16 @@ export default async function LeadsPage({ searchParams }: PageProps) {
   const minFollowersNum = parseInt(params.minFollowers ?? "", 10);
   if (Number.isFinite(minFollowersNum)) q = q.gte("instagram_followers", minFollowersNum);
 
-  q = q.order("priority", { ascending: false }).order("created_at", { ascending: false });
+  q = q
+    .order("priority", { ascending: false })
+    .order("created_at", { ascending: false })
+    .range(from, to);
 
-  const [{ data: leadsData, error: leadsError }, totalRes, citiesRes] = await Promise.all([
+  const [
+    { data: leadsData, error: leadsError, count: filteredCount },
+    totalRes,
+    citiesRes,
+  ] = await Promise.all([
     q,
     supabase.from("leads").select("id", { count: "exact", head: true }),
     supabase.from("leads").select("city").not("city", "is", null),
@@ -84,12 +103,27 @@ export default async function LeadsPage({ searchParams }: PageProps) {
   }
 
   const leads = (leadsData ?? []) as Lead[];
+  const matchingCount = filteredCount ?? 0;
   const totalCount = totalRes.count ?? 0;
 
   // Distinct cities, sorted Croatian-locale.
   const cities = Array.from(
     new Set(((citiesRes.data ?? []) as { city: string }[]).map((r) => r.city)),
   ).sort((a, b) => a.localeCompare(b, "hr"));
+
+  const totalPages = Math.max(1, Math.ceil(matchingCount / pageSize));
+  const pageHref = (targetPage: number) => {
+    const sp = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value) sp.set(key, value);
+    }
+    if (targetPage <= 1) sp.delete("page");
+    else sp.set("page", String(targetPage));
+    if (pageSize === 100) sp.delete("pageSize");
+    else sp.set("pageSize", String(pageSize));
+    const qs = sp.toString();
+    return qs ? `/leads?${qs}` : "/leads";
+  };
 
   // First-run empty state: zero rows total and no filters applied.
   if (totalCount === 0) {
@@ -117,8 +151,37 @@ export default async function LeadsPage({ searchParams }: PageProps) {
           Run scrape →
         </Link>
       </div>
-      <LeadsFilters cities={cities} shownCount={leads.length} totalCount={totalCount} />
+      <LeadsFilters cities={cities} shownCount={matchingCount} totalCount={totalCount} />
       <LeadsTable leads={leads} />
+      {matchingCount > pageSize ? (
+        <nav className="flex items-center justify-between border-t border-border pt-4 text-sm">
+          <Link
+            href={pageHref(Math.max(1, page - 1))}
+            aria-disabled={page <= 1}
+            className={
+              page <= 1
+                ? "pointer-events-none text-muted-foreground/50"
+                : "text-muted-foreground underline-offset-4 hover:underline"
+            }
+          >
+            Previous
+          </Link>
+          <span className="text-xs text-muted-foreground">
+            Page {Math.min(page, totalPages)} of {totalPages}
+          </span>
+          <Link
+            href={pageHref(Math.min(totalPages, page + 1))}
+            aria-disabled={page >= totalPages}
+            className={
+              page >= totalPages
+                ? "pointer-events-none text-muted-foreground/50"
+                : "text-muted-foreground underline-offset-4 hover:underline"
+            }
+          >
+            Next
+          </Link>
+        </nav>
+      ) : null}
     </main>
   );
 }

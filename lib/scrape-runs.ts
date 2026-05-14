@@ -1,6 +1,7 @@
 import { getServerSupabase } from "@/lib/supabase-server";
 import type {
   ScrapeCounts,
+  ScrapeRun,
   ScrapeRunStatus,
   ScrapeSourceType,
 } from "@/lib/types";
@@ -24,17 +25,57 @@ export async function createScrapeRun(
   return data.id as string;
 }
 
+/** Compute run counts from the rows actually linked to the run. */
+export async function computeScrapeRunCounts(runId: string): Promise<ScrapeCounts> {
+  const supabase = getServerSupabase();
+  const { count: totalLinks, error: totalErr } = await supabase
+    .from("scrape_run_leads")
+    .select("*", { count: "exact", head: true })
+    .eq("run_id", runId);
+  if (totalErr) throw new Error(`computeScrapeRunCounts total: ${totalErr.message}`);
+
+  const { count: qualifiedLinks, error: qualifiedErr } = await supabase
+    .from("scrape_run_leads")
+    .select("leads!inner(qualified)", { count: "exact", head: true })
+    .eq("run_id", runId)
+    .eq("leads.qualified", true);
+  if (qualifiedErr) {
+    throw new Error(`computeScrapeRunCounts qualified: ${qualifiedErr.message}`);
+  }
+
+  const linked = totalLinks ?? 0;
+  return {
+    found: linked,
+    qualified: qualifiedLinks ?? 0,
+    new: linked,
+    skipped: 0,
+  };
+}
+
+/** Attach live linked-lead counts to run rows without mutating the database. */
+export async function withComputedRunCounts<T extends ScrapeRun>(
+  runs: T[],
+): Promise<T[]> {
+  return Promise.all(
+    runs.map(async (run) => ({
+      ...run,
+      counts: await computeScrapeRunCounts(run.id).catch(() => run.counts ?? {}),
+    })),
+  );
+}
+
 /**
- * Finalize a run with status + final counts. Called once by the client after
- * all chunks complete (or when the orchestrator aborts on error).
+ * Finalize a run with server-computed linked-lead counts. The client still
+ * sends its local counters for backwards compatibility, but they are ignored.
  */
 export async function finalizeScrapeRun(
   id: string,
   status: ScrapeRunStatus,
-  counts: ScrapeCounts,
+  _clientCounts: ScrapeCounts,
   errorMessage: string | null = null,
 ): Promise<void> {
   const supabase = getServerSupabase();
+  const counts = await computeScrapeRunCounts(id);
   const { error } = await supabase
     .from("scrape_runs")
     .update({
@@ -74,27 +115,20 @@ export async function janitorFinalizeStaleRuns(staleMinutes = 10): Promise<void>
   if (!stale || stale.length === 0) return;
 
   for (const r of stale) {
-    const { count: totalLinks } = await supabase
-      .from("scrape_run_leads")
-      .select("*", { count: "exact", head: true })
-      .eq("run_id", r.id as string);
-    const { count: qualifiedLinks } = await supabase
-      .from("scrape_run_leads")
-      .select("leads!inner(qualified)", { count: "exact", head: true })
-      .eq("run_id", r.id as string)
-      .eq("leads.qualified", true);
+    let counts: ScrapeCounts;
+    try {
+      counts = await computeScrapeRunCounts(r.id as string);
+    } catch (err) {
+      console.error(`janitor counts: ${(err as Error).message}`);
+      counts = { found: 0, qualified: 0, new: 0, skipped: 0 };
+    }
 
     await supabase
       .from("scrape_runs")
       .update({
         status: "error",
         ended_at: new Date().toISOString(),
-        counts: {
-          found: totalLinks ?? 0,
-          qualified: qualifiedLinks ?? 0,
-          new: totalLinks ?? 0,
-          skipped: 0,
-        },
+        counts,
         error_message: `Auto-finalized by janitor (orchestration tab closed before finalize)`,
       })
       .eq("id", r.id as string);
