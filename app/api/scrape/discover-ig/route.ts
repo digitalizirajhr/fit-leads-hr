@@ -168,6 +168,12 @@ export async function POST(req: NextRequest) {
               term,
               message: `${n} bios sent to Claude Haiku for fallback classification`,
             }),
+          onAiError: (n) =>
+            send({
+              stage: "filtering",
+              term,
+              message: `${n} AI calls failed (no credits / network) — kept those profiles for manual review`,
+            }),
         });
         send({
           stage: "filtering",

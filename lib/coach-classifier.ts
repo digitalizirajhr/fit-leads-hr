@@ -24,10 +24,10 @@ function passesKeywordFilter(bio: string | null): boolean {
 
 /**
  * AI fallback: ask Claude Haiku if the bio describes a fitness pro.
- * Returns true on YES, false on NO or any error (fail-closed — don't keep
- * unverified profiles when the API errors).
+ * Returns true on YES from the model, false on a clear NO, and `null`
+ * on any API/network error so the caller can decide what to do.
  */
-async function aiClassifyBio(bio: string, apiKey: string): Promise<boolean> {
+async function aiClassifyBio(bio: string, apiKey: string): Promise<boolean | null> {
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -48,25 +48,35 @@ async function aiClassifyBio(bio: string, apiKey: string): Promise<boolean> {
       }),
       cache: "no-store",
     });
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const json = (await res.json()) as { content?: Array<{ text?: string }> };
     const text = json.content?.[0]?.text?.trim().toUpperCase() ?? "";
-    return text.startsWith("YES");
+    if (text.startsWith("YES")) return true;
+    if (text.startsWith("NO")) return false;
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 /**
  * Filter profiles to those plausibly being fitness coaches.
- *   - Pass 1: bio keyword match → keep
- *   - Pass 2 (only if ANTHROPIC_API_KEY set): AI fallback for keyword misses
  *
- * Returns kept profiles in input order.
+ * Behavior:
+ *   - Profile bio matches a fitness keyword → kept (high confidence)
+ *   - No keyword match + AI key present + AI says YES → kept
+ *   - No keyword match + AI key present + AI says NO → DROPPED
+ *   - No keyword match + AI key NOT present → kept (fail-open — better to
+ *     show possibly-non-coach profiles than silently lose real coaches)
+ *   - No keyword match + AI key present but errors (no credits, network) →
+ *     kept (same fail-open principle)
+ *
+ * Net: when AI is broken, you get more leads + need to manually qualify.
+ * When AI works, the AI does the triage and you get clean results.
  */
 export async function filterCoaches(
   profiles: EnrichedProfile[],
-  opts?: { onAiCall?: (count: number) => void },
+  opts?: { onAiCall?: (count: number) => void; onAiError?: (count: number) => void },
 ): Promise<EnrichedProfile[]> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const kept: EnrichedProfile[] = [];
@@ -76,17 +86,30 @@ export async function filterCoaches(
     if (passesKeywordFilter(p.bio)) {
       kept.push(p);
     } else if (apiKey && p.bio && p.bio.trim().length > 0) {
+      // Defer to AI; tracked separately below.
       aiCandidates.push(p);
+    } else {
+      // No AI available at all → keep, let user triage manually.
+      kept.push(p);
     }
   }
 
   if (apiKey && aiCandidates.length > 0) {
     opts?.onAiCall?.(aiCandidates.length);
+    let errorCount = 0;
     // Sequential to keep cost / rate-limit predictable. Haiku is fast.
     for (const p of aiCandidates) {
-      const isCoach = await aiClassifyBio(p.bio!, apiKey);
-      if (isCoach) kept.push(p);
+      const verdict = await aiClassifyBio(p.bio!, apiKey);
+      if (verdict === true) {
+        kept.push(p);
+      } else if (verdict === null) {
+        // AI errored (no credits, network, etc.) — fail-open: keep.
+        kept.push(p);
+        errorCount++;
+      }
+      // verdict === false → confidently dropped
     }
+    if (errorCount > 0) opts?.onAiError?.(errorCount);
   }
 
   return kept;
