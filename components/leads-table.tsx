@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { ExportDialog } from "@/components/export-dialog";
 import { StatusSelect } from "@/components/status-select";
 import { PriorityStars } from "@/components/priority-stars";
