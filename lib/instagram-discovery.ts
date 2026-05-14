@@ -1,15 +1,22 @@
-// Wrappers around the 4 Apify discovery actors used by /api/scrape/discover-ig.
+// Wrappers around the Apify discovery actors used by /api/scrape/discover-ig.
 // Each returns a list of unique IG handles (lowercased). Results capped per
 // call so each chunk fits Vercel's 60s timeout.
+//
+// Actor IDs verified against https://apify.com/store on 2026-05-14:
+//   - apify/instagram-hashtag-scraper      (official)
+//   - apify/instagram-scraper              (official, multi-purpose)
+//   - louisdeconinck/instagram-followers-scraper  (community — official Apify
+//     no longer publishes a follower-list actor; this one is the most
+//     maintained alternative as of 2026-05)
 
 const MAX_RESULTS_PER_CALL = 100;
 
 const HASHTAG_ENDPOINT =
   "https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items";
-const SEARCH_ENDPOINT =
+const GENERIC_ENDPOINT =
   "https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items";
 const FOLLOWERS_ENDPOINT =
-  "https://api.apify.com/v2/acts/apify~instagram-follower-scraper/run-sync-get-dataset-items";
+  "https://api.apify.com/v2/acts/louisdeconinck~instagram-followers-scraper/run-sync-get-dataset-items";
 
 export type DiscoveryMethod = "hashtag" | "location" | "seed" | "bio_keyword";
 
@@ -62,24 +69,37 @@ export async function discoverByHashtags(
   return uniqueLower(items.map((p) => p.ownerUsername));
 }
 
-/** Location-name search → unique authors of recent posts at those locations. */
+/**
+ * Location-name search → unique authors of recent posts at those locations.
+ * Uses apify/instagram-scraper's "search → place → posts" flow. Each location
+ * name resolves to its top match on Instagram.
+ */
 export async function discoverByLocations(
   locationNames: string[],
   apifyToken: string,
 ): Promise<string[]> {
   const cleaned = locationNames.map((n) => n.trim()).filter(Boolean);
   if (cleaned.length === 0) return [];
-  const url = `${SEARCH_ENDPOINT}?token=${apifyToken}`;
-  const items = await postJson<ApifyPost[]>(url, {
-    search: cleaned.join(","),
-    searchType: "place",
-    resultsType: "posts",
-    resultsLimit: MAX_RESULTS_PER_CALL,
-  });
-  return uniqueLower(items.map((p) => p.ownerUsername));
+  const url = `${GENERIC_ENDPOINT}?token=${apifyToken}`;
+  // Run search-by-place for each location, dedupe across all of them.
+  const all: string[] = [];
+  for (const loc of cleaned) {
+    const items = await postJson<ApifyPost[]>(url, {
+      search: loc,
+      searchType: "place",
+      resultsType: "posts",
+      searchLimit: 1, // top matching place
+      resultsLimit: MAX_RESULTS_PER_CALL,
+    });
+    for (const p of items) if (p.ownerUsername) all.push(p.ownerUsername);
+  }
+  return uniqueLower(all);
 }
 
-/** Followers + followings of given seed accounts. */
+/**
+ * Followers of given seed accounts. Community actor — input is one or more
+ * usernames; output is the followers list per account, deduped here.
+ */
 export async function discoverBySeedFollowers(
   seedUsernames: string[],
   apifyToken: string,
@@ -96,18 +116,22 @@ export async function discoverBySeedFollowers(
   return uniqueLower(items.map((f) => f.username));
 }
 
-/** Bio/user keyword search → matching usernames. */
+/**
+ * Bio/user keyword search → matching usernames. Uses apify/instagram-scraper's
+ * "search → user → details" flow. The keywords are joined into a single
+ * search query (matches IG's own search-bar behavior).
+ */
 export async function discoverByBioKeywords(
   keywords: string[],
   apifyToken: string,
 ): Promise<string[]> {
   const cleaned = keywords.map((k) => k.trim()).filter(Boolean);
   if (cleaned.length === 0) return [];
-  const url = `${SEARCH_ENDPOINT}?token=${apifyToken}`;
+  const url = `${GENERIC_ENDPOINT}?token=${apifyToken}`;
   const items = await postJson<ApifyUser[]>(url, {
     search: cleaned.join(" "),
     searchType: "user",
-    resultsType: "users",
+    resultsType: "details",
     resultsLimit: MAX_RESULTS_PER_CALL,
   });
   return uniqueLower(items.map((u) => u.username));
