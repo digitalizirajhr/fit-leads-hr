@@ -232,19 +232,91 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           stage: "searching",
           message: `Method: ${m.method} (${m.values.length} value${m.values.length === 1 ? "" : "s"})`,
         });
-        const last = await streamPost("/api/scrape/discover-ig", {
-          method: m.method,
-          values: m.values,
-          skipExisting: req.skipExisting,
-          rule: req.rule,
-          runId,
-        });
-        if (last?.stage === "error") hadError = true;
-        if (last?.counts) {
-          totals.found += last.counts.found ?? 0;
-          totals.qualified += last.counts.qualified ?? 0;
-          totals.new += last.counts.new ?? 0;
-          totals.skipped += last.counts.skipped ?? 0;
+
+        // Step 1: kick off the Apify run (returns immediately with runId).
+        // Big seeds like fitness_byiva @ 603 followings take 90+ seconds in
+        // the actor — way over Vercel's 60s function limit — so we can't
+        // wait for it inline.
+        let apifyRunId: string;
+        try {
+          const startResp = await fetch("/api/scrape/discover-ig/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ method: m.method, values: m.values }),
+          });
+          if (!startResp.ok) {
+            const txt = await startResp.text().catch(() => "");
+            append({
+              stage: "error",
+              message: `Failed to start Apify run for ${m.method}: ${startResp.status} ${txt || startResp.statusText}`,
+            });
+            hadError = true;
+            continue;
+          }
+          const json = (await startResp.json()) as { apifyRunId?: string; error?: string };
+          if (!json.apifyRunId) {
+            append({
+              stage: "error",
+              message: `No apifyRunId returned for ${m.method}: ${json.error ?? "unknown"}`,
+            });
+            hadError = true;
+            continue;
+          }
+          apifyRunId = json.apifyRunId;
+        } catch (err) {
+          append({
+            stage: "error",
+            message: `Network error starting ${m.method}: ${(err as Error).message}`,
+          });
+          hadError = true;
+          continue;
+        }
+
+        // Step 2: poll the run. Each /poll call burns up to ~50s polling
+        // Apify, then either returns `done` (run finished, dataset saved)
+        // or a `__POLL_AGAIN__` marker if the run is still going. We just
+        // re-call /poll until one of those two outcomes wins. The safety
+        // cap is a worst-case guard — at ~50s/call, 30 polls = 25 minutes.
+        const POLL_RETRY_CAP = 30;
+        let methodFinished = false;
+        for (let p = 0; p < POLL_RETRY_CAP; p++) {
+          const last = await streamPost("/api/scrape/discover-ig/poll", {
+            apifyRunId,
+            method: m.method,
+            skipExisting: req.skipExisting,
+            rule: req.rule,
+            runId,
+          });
+          if (!last) {
+            // Stream closed without any event — treat as transient, retry.
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          if (last.stage === "error") {
+            hadError = true;
+            methodFinished = true;
+            break;
+          }
+          if (last.stage === "done") {
+            if (last.counts) {
+              totals.found += last.counts.found ?? 0;
+              totals.qualified += last.counts.qualified ?? 0;
+              totals.new += last.counts.new ?? 0;
+              totals.skipped += last.counts.skipped ?? 0;
+            }
+            methodFinished = true;
+            break;
+          }
+          // Otherwise it was the __POLL_AGAIN__ marker. Brief pause, then
+          // call /poll again so it can resume polling Apify for another 50s.
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        if (!methodFinished) {
+          append({
+            stage: "error",
+            message: `Hit poll retry cap (${POLL_RETRY_CAP}) for ${m.method}; Apify run still not finished.`,
+          });
+          hadError = true;
         }
       }
 
