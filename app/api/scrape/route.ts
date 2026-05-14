@@ -4,6 +4,7 @@ import { searchPlaces, type RawPlace } from "@/lib/places";
 import { checkWebsitesParallel } from "@/lib/website-check";
 import { computeQualified } from "@/lib/qualification";
 import { requireAuth } from "@/lib/require-auth";
+import { linkLeadsToRun } from "@/lib/scrape-runs";
 import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -17,6 +18,8 @@ interface Body {
   skipExisting?: boolean;
   /** Per-scrape qualification rule. If absent, falls back to DEFAULT_RULE. */
   rule?: Partial<QualificationRule>;
+  /** If present, every upserted lead in this chunk is linked to this run id. */
+  runId?: string;
 }
 
 /**
@@ -54,6 +57,7 @@ export async function POST(req: NextRequest) {
   // Merge with defaults so older clients (or partial bodies) still produce a
   // valid rule instead of crashing computeQualified on missing fields.
   const rule: QualificationRule = { ...DEFAULT_RULE, ...(body.rule ?? {}) };
+  const runId = typeof body.runId === "string" ? body.runId : null;
 
   if (!city || !term) {
     return new Response(
@@ -179,6 +183,15 @@ export async function POST(req: NextRequest) {
           .from("leads")
           .upsert(rows, { onConflict: "place_id" });
         if (upsertErr) throw new Error(`Upsert failed: ${upsertErr.message}`);
+
+        // Link these leads to the run for /history (best-effort).
+        if (runId && rows.length > 0) {
+          const { data: linked } = await supabase
+            .from("leads")
+            .select("id")
+            .in("place_id", rows.map((r) => r.place_id));
+          await linkLeadsToRun(runId, (linked ?? []).map((l) => l.id as string));
+        }
 
         send({
           stage: "done",

@@ -5,6 +5,7 @@ import { discoverHandles, type DiscoveryMethod } from "@/lib/instagram-discovery
 import { filterCoaches } from "@/lib/coach-classifier";
 import { computeQualified } from "@/lib/qualification";
 import { requireAuth } from "@/lib/require-auth";
+import { linkLeadsToRun } from "@/lib/scrape-runs";
 import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -15,6 +16,8 @@ interface Body {
   values?: string[];
   skipExisting?: boolean;
   rule?: Partial<QualificationRule>;
+  /** If present, every upserted lead in this chunk is linked to this run id. */
+  runId?: string;
 }
 
 const VALID_METHODS: DiscoveryMethod[] = ["hashtag", "location", "seed", "bio_keyword"];
@@ -52,6 +55,7 @@ export async function POST(req: NextRequest) {
     : [];
   const skipExisting = body.skipExisting !== false;
   const rule: QualificationRule = { ...DEFAULT_RULE, ...(body.rule ?? {}) };
+  const runId = typeof body.runId === "string" ? body.runId : null;
 
   if (!method || !VALID_METHODS.includes(method)) {
     return new Response(
@@ -236,6 +240,15 @@ export async function POST(req: NextRequest) {
           .from("leads")
           .upsert(rows, { onConflict: "place_id" });
         if (upsertErr) throw new Error(`Upsert: ${upsertErr.message}`);
+
+        // Link these leads to the run for /history (best-effort).
+        if (runId && rows.length > 0) {
+          const { data: linked } = await supabase
+            .from("leads")
+            .select("id")
+            .in("place_id", rows.map((r) => r.place_id));
+          await linkLeadsToRun(runId, (linked ?? []).map((l) => l.id as string));
+        }
 
         send({
           stage: "done",
