@@ -316,10 +316,172 @@ export async function POST(req: NextRequest) {
             run.status === "ABORTING" ||
             run.status === "TIMING-OUT"
           ) {
+            // Try to salvage any partial dataset — Apify often aborts mid-run
+            // (cost cap, manual abort, etc.) but the dataset still has whatever
+            // it managed to fetch. Better to keep those leads than throw them
+            // away. If the dataset turns out to be empty, fall through to the
+            // hard-error branch below.
+            let partialItems: string[] = [];
+            if (run.defaultDatasetId) {
+              try {
+                partialItems = await fetchDiscoveryHandles(
+                  method,
+                  run.defaultDatasetId,
+                  apifyToken,
+                );
+              } catch {
+                // ignore — we'll just emit the error event below
+              }
+            }
+
+            if (partialItems.length > 0) {
+              // Salvage path: re-emit the same event sequence as SUCCEEDED
+              // would, just with a loud warning at the top.
+              send({
+                stage: "filtering",
+                term,
+                message: `⚠️ Apify ${run.status}${run.statusMessage ? `: ${run.statusMessage}` : ""} — salvaging ${partialItems.length} partial results from the dataset before bailing out`,
+              });
+              send({
+                stage: "searching",
+                term,
+                message: `Found ${partialItems.length} candidate handles (partial — Apify aborted)`,
+                counts: { found: partialItems.length },
+              });
+
+              const supabaseSalvage = getServerSupabase();
+              let toUpsertSalvage = partialItems;
+              let skippedExistingSalvage = 0;
+              if (skipExisting) {
+                const [allPids, allHandles] = await Promise.all([
+                  supabaseSalvage
+                    .from("leads")
+                    .select("place_id")
+                    .like("place_id", "ig:%")
+                    .limit(100000),
+                  supabaseSalvage
+                    .from("leads")
+                    .select("instagram_handle")
+                    .not("instagram_handle", "is", null)
+                    .limit(100000),
+                ]);
+                const existingSet = new Set<string>();
+                for (const r of allPids.data ?? []) {
+                  const pid = r.place_id as string;
+                  if (pid.startsWith("ig:")) existingSet.add(pid.slice(3).toLowerCase());
+                }
+                for (const r of allHandles.data ?? []) {
+                  if (r.instagram_handle)
+                    existingSet.add((r.instagram_handle as string).toLowerCase());
+                }
+                toUpsertSalvage = partialItems.filter((h) => !existingSet.has(h));
+                skippedExistingSalvage = partialItems.length - toUpsertSalvage.length;
+              }
+
+              if (toUpsertSalvage.length === 0) {
+                send({
+                  stage: "done",
+                  term,
+                  message: `Apify aborted; partial results all already in DB (${skippedExistingSalvage} skipped).`,
+                  counts: {
+                    found: partialItems.length,
+                    qualified: 0,
+                    new: 0,
+                    skipped: skippedExistingSalvage,
+                  },
+                });
+                controller.close();
+                return;
+              }
+
+              const chunkSalvage = toUpsertSalvage.slice(0, UPSERT_CHUNK_SIZE);
+              const remainingSalvage = toUpsertSalvage.length - chunkSalvage.length;
+              const rowsSalvage = chunkSalvage.map((handle) => ({
+                place_id: `ig:${handle}`,
+                name: handle,
+                phone: null,
+                current_website: `https://instagram.com/${handle}`,
+                address: null,
+                city: null,
+                latitude: null,
+                longitude: null,
+                google_rating: null,
+                google_review_count: null,
+                instagram_handle: handle,
+                instagram_followers: null,
+                instagram_bio: null,
+                instagram_last_post_at: null,
+                instagram_is_active: null,
+                has_real_website: false,
+                qualified: computeQualified(
+                  {
+                    has_real_website: false,
+                    phone: null,
+                    google_rating: null,
+                    google_review_count: null,
+                    instagram_handle: handle,
+                    instagram_is_active: null,
+                    instagram_followers: null,
+                    city: null,
+                  },
+                  rule,
+                ),
+              }));
+
+              send({
+                stage: "saving",
+                term,
+                message: `Upserting chunk of ${rowsSalvage.length} salvaged handles${remainingSalvage > 0 ? ` (${remainingSalvage} more after this)` : ""}…`,
+              });
+              const { error: upsertErrSalvage } = await supabaseSalvage
+                .from("leads")
+                .upsert(rowsSalvage, { onConflict: "place_id" });
+              if (upsertErrSalvage)
+                throw new Error(`Salvage upsert: ${upsertErrSalvage.message}`);
+
+              if (runId && rowsSalvage.length > 0) {
+                const { data: linked } = await supabaseSalvage
+                  .from("leads")
+                  .select("id")
+                  .in("place_id", rowsSalvage.map((r) => r.place_id));
+                await linkLeadsToRun(
+                  runId,
+                  (linked ?? []).map((l) => l.id as string),
+                );
+              }
+
+              if (remainingSalvage > 0) {
+                send({
+                  stage: "saving",
+                  term,
+                  message: `Salvage chunk done (+${rowsSalvage.length}); ${remainingSalvage} more to upsert.`,
+                });
+                send({ stage: "enriching", term, message: `__POLL_AGAIN__` });
+              } else {
+                send({
+                  stage: "done",
+                  term,
+                  message: `Done ${method} (PARTIAL — Apify aborted): +${rowsSalvage.length} salvaged rows. Raise per-run cost cap in Apify settings to get the full set.`,
+                  counts: {
+                    found: partialItems.length,
+                    qualified: rowsSalvage.filter((r) => r.qualified).length,
+                    new: rowsSalvage.length,
+                    skipped: skippedExistingSalvage,
+                  },
+                });
+              }
+              controller.close();
+              return;
+            }
+
+            // No partial data — emit a clear, actionable error.
+            const costHint = (run.statusMessage ?? "").toLowerCase().includes("maximum cost")
+              ? " — raise the per-run cost cap in Apify console (Settings → Account → Plans & Billing → Limits) to scrape larger accounts"
+              : "";
             send({
               stage: "error",
               term,
-              message: `Apify run ${run.status}${run.statusMessage ? `: ${run.statusMessage}` : ""}`,
+              message: `Apify run ${run.status}${run.statusMessage ? `: ${run.statusMessage}` : ""}${costHint}`,
             });
             controller.close();
             return;
