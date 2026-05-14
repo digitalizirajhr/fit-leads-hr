@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { searchPlaces, type RawPlace } from "@/lib/places";
 import { checkWebsitesParallel } from "@/lib/website-check";
-import type { ScrapeEvent } from "@/lib/types";
+import { computeQualified } from "@/lib/qualification";
+import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
 // 60s is the Hobby+Pro default. Each chunk = ONE (city, term), well under
@@ -81,6 +82,17 @@ export async function POST(req: NextRequest) {
 
         const supabase = getServerSupabase();
 
+        // ---- 2.5 Read the qualification rule (one query, used per-row below) ----
+        const { data: settingsRow } = await supabase
+          .from("settings")
+          .select("qualification_rules")
+          .eq("id", "singleton")
+          .maybeSingle();
+        const rule: QualificationRule = {
+          ...DEFAULT_RULE,
+          ...((settingsRow?.qualification_rules as Partial<QualificationRule>) ?? {}),
+        };
+
         // ---- 3. Skip existing place_ids in DB ----
         let candidates = deduped;
         let skippedExisting = 0;
@@ -136,7 +148,23 @@ export async function POST(req: NextRequest) {
           google_rating: p.google_rating,
           google_review_count: p.google_review_count,
           has_real_website: websiteResults[i],
-          qualified: !websiteResults[i] && !!p.phone,
+          qualified: computeQualified(
+            {
+              has_real_website: websiteResults[i],
+              phone: p.phone,
+              google_rating: p.google_rating,
+              google_review_count: p.google_review_count,
+              // IG fields aren't enriched yet at scrape time — passed as nulls.
+              // The IG-enrich endpoint will recompute via /api/settings/recompute-qualified
+              // if you want enriched-aware qualification (or just hit the recompute
+              // button manually after enrichment).
+              instagram_handle: null,
+              instagram_is_active: null,
+              instagram_followers: null,
+              city,
+            },
+            rule,
+          ),
         }));
 
         const qualifiedCount = rows.filter((r) => r.qualified).length;
