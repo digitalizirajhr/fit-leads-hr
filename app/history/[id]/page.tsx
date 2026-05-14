@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { Badge } from "@/components/ui/badge";
 import { LeadsTable } from "@/components/leads-table";
+import { StopRunButton } from "@/components/stop-run-button";
 import { formatRelativeTime } from "@/lib/format";
 import type { Lead, ScrapeRun } from "@/lib/types";
 
@@ -76,6 +77,11 @@ export default async function HistoryDetailPage({ params }: PageProps) {
               ? "⚠️ error"
               : "… running"}
         </Badge>
+        {run.status === "running" ? (
+          <div className="ml-auto">
+            <StopRunButton runId={run.id} />
+          </div>
+        ) : null}
       </header>
 
       <section className="grid grid-cols-2 gap-4 sm:grid-cols-4">

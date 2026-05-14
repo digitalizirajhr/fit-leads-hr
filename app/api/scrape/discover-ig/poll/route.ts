@@ -91,6 +91,29 @@ export async function POST(req: NextRequest) {
       const startTs = Date.now();
 
       try {
+        // Honor force-stop: if the user marked this scrape_runs row as
+        // 'error' via /api/scrape-runs/:id/stop, bail out before doing
+        // any more Apify work. The check is cheap (one indexed DB lookup
+        // per /poll call) and means stopping from /history actually
+        // halts work even if the orchestrating browser tab is still open.
+        if (runId) {
+          const supabaseEarly = getServerSupabase();
+          const { data: runRow } = await supabaseEarly
+            .from("scrape_runs")
+            .select("status")
+            .eq("id", runId)
+            .maybeSingle();
+          if (runRow?.status === "error") {
+            send({
+              stage: "error",
+              term,
+              message: `Run was force-stopped by user.`,
+            });
+            controller.close();
+            return;
+          }
+        }
+
         // Poll loop within budget.
         while (Date.now() - startTs < POLL_BUDGET_MS) {
           const run = await getDiscoveryRun(apifyRunId, apifyToken);
@@ -119,25 +142,41 @@ export async function POST(req: NextRequest) {
 
             const supabase = getServerSupabase();
 
-            // Skip-existing
+            // Skip-existing — chunked.
+            //
+            // PostgREST encodes .in() as a URL query string: passing 990
+            // values made a ~15 KB URL, which silently hung the request and
+            // killed the function before any further events could fire (the
+            // hallmark of "Found N candidate handles" looping forever in
+            // the UI). We split the check into 100-item chunks so each URL
+            // stays well under any common limit.
             let toUpsert = candidates;
             let skippedExisting = 0;
             if (skipExisting) {
-              const placeIds = candidates.map((h) => `ig:${h}`);
-              const [byPid, byHandle] = await Promise.all([
-                supabase.from("leads").select("place_id").in("place_id", placeIds),
-                supabase.from("leads").select("instagram_handle").in("instagram_handle", candidates),
-              ]);
-              if (byPid.error) throw new Error(`Existing-check (place_id): ${byPid.error.message}`);
-              if (byHandle.error) throw new Error(`Existing-check (handle): ${byHandle.error.message}`);
-
+              const EXISTING_CHECK_CHUNK = 100;
               const existingSet = new Set<string>();
-              for (const r of byPid.data ?? []) {
-                const pid = r.place_id as string;
-                if (pid.startsWith("ig:")) existingSet.add(pid.slice(3).toLowerCase());
-              }
-              for (const r of byHandle.data ?? []) {
-                if (r.instagram_handle) existingSet.add((r.instagram_handle as string).toLowerCase());
+              for (let i = 0; i < candidates.length; i += EXISTING_CHECK_CHUNK) {
+                const slice = candidates.slice(i, i + EXISTING_CHECK_CHUNK);
+                const placeIds = slice.map((h) => `ig:${h}`);
+                const [byPid, byHandle] = await Promise.all([
+                  supabase.from("leads").select("place_id").in("place_id", placeIds),
+                  supabase
+                    .from("leads")
+                    .select("instagram_handle")
+                    .in("instagram_handle", slice),
+                ]);
+                if (byPid.error)
+                  throw new Error(`Existing-check (place_id): ${byPid.error.message}`);
+                if (byHandle.error)
+                  throw new Error(`Existing-check (handle): ${byHandle.error.message}`);
+                for (const r of byPid.data ?? []) {
+                  const pid = r.place_id as string;
+                  if (pid.startsWith("ig:")) existingSet.add(pid.slice(3).toLowerCase());
+                }
+                for (const r of byHandle.data ?? []) {
+                  if (r.instagram_handle)
+                    existingSet.add((r.instagram_handle as string).toLowerCase());
+                }
               }
               toUpsert = candidates.filter((h) => !existingSet.has(h));
               skippedExisting = candidates.length - toUpsert.length;
