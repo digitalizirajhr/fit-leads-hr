@@ -31,6 +31,14 @@ const VALID_METHODS: DiscoveryMethod[] = ["hashtag", "location", "seed", "bio_ke
 const POLL_INTERVAL_MS = 5_000;
 const POLL_BUDGET_MS = 50_000;
 
+// Once Apify reaches SUCCEEDED, we still have to upsert N rows + link them to
+// the scrape_runs row. For 990 candidates that's two large .in() queries, a
+// 990-row upsert, and a 990-row link upsert — all of which together exceed
+// Vercel's 60s function ceiling. So we process the post-Apify work in chunks
+// of UPSERT_CHUNK_SIZE per /poll call. The client keeps re-calling until the
+// route emits `done` (i.e., nothing left to upsert).
+const UPSERT_CHUNK_SIZE = 200;
+
 /**
  * POST /api/scrape/discover-ig/poll
  *
@@ -152,9 +160,16 @@ export async function POST(req: NextRequest) {
               return;
             }
 
+            // Take ONE chunk per /poll call. The skip-existing check above
+            // already filtered out rows from prior chunks of this same run
+            // (because each chunk was committed before the next /poll call),
+            // so toUpsert shrinks naturally as chunks complete.
+            const chunk = toUpsert.slice(0, UPSERT_CHUNK_SIZE);
+            const remainingAfterChunk = toUpsert.length - chunk.length;
+
             // Upsert raw rows (enrichment + AI classification happen later
             // via the /api/scrape/enrich polling loop).
-            const rows = toUpsert.map((handle) => ({
+            const rows = chunk.map((handle) => ({
               place_id: `ig:${handle}`,
               name: handle,
               phone: null,
@@ -190,7 +205,7 @@ export async function POST(req: NextRequest) {
             send({
               stage: "saving",
               term,
-              message: `Upserting ${rows.length} raw handles…`,
+              message: `Upserting chunk of ${rows.length} raw handles${remainingAfterChunk > 0 ? ` (${remainingAfterChunk} more after this)` : ""}…`,
             });
 
             const { error: upsertErr } = await supabase
@@ -207,10 +222,33 @@ export async function POST(req: NextRequest) {
               await linkLeadsToRun(runId, (linked ?? []).map((l) => l.id as string));
             }
 
+            if (remainingAfterChunk > 0) {
+              // More chunks left — emit POLL_AGAIN so client re-calls /poll.
+              // Next call's skip-existing query will exclude what we just
+              // upserted, so toUpsert shrinks until empty.
+              send({
+                stage: "saving",
+                term,
+                message: `Chunk done (+${rows.length}); ${remainingAfterChunk} candidates still to upsert.`,
+              });
+              send({
+                stage: "enriching",
+                term,
+                message: `__POLL_AGAIN__`,
+              });
+              controller.close();
+              return;
+            }
+
+            // Final chunk — done. Counts here describe just THIS chunk; the
+            // history page can compute true cumulative counts from the linked
+            // scrape_run_leads rows. The client also accumulates per-chunk
+            // counts across the loop, so the live progress bar's totals add
+            // up across all chunks of all methods of this run.
             send({
               stage: "done",
               term,
-              message: `Done ${method}: +${rows.length} raw rows. Enrichment + AI classification will run next.`,
+              message: `Done ${method}: +${rows.length} raw rows in final chunk. Enrichment + AI classification will run next.`,
               counts: {
                 found: candidates.length,
                 qualified: qualifiedCount,
