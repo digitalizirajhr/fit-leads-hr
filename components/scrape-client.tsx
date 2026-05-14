@@ -2,45 +2,45 @@
 
 import { useState } from "react";
 import { ScrapeForm, type ScrapeRequest } from "@/components/scrape-form";
+import {
+  ScrapeFormInstagram,
+  type InstagramScrapeRequest,
+} from "@/components/scrape-form-instagram";
 import { ScrapeProgress } from "@/components/scrape-progress";
+import {
+  ScrapeSourcePicker,
+  type ScrapeSource,
+} from "@/components/scrape-source-picker";
 import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
-/**
- * Orchestrator for the chunked scrape pipeline.
- *
- * Why chunked: a full Croatia sweep is ~5-15 minutes total — way past any
- * Vercel function timeout. So we split the work into per-(city × term)
- * requests, each well under 60s. The browser does the looping; the
- * server endpoints stay short-lived.
- *
- * Flow:
- *   1. For each (city, term) combo selected in the form: POST /api/scrape
- *      and stream its events into the log.
- *   2. If "Enrich with Instagram" is on: POST /api/scrape/enrich repeatedly
- *      until the server reports `remaining: 0`.
- *   3. Emit a final `done` event with overall summary.
- *
- * Errors in any single chunk emit an error event but DON'T stop the loop —
- * a transient quota hiccup or one bad city shouldn't waste the rest.
- */
 interface ScrapeClientProps {
   initialCustomTerms: string[];
   citiesInDb: string[];
 }
 
+/**
+ * Top-level orchestrator for the /scrape multi-step form.
+ *
+ * Step 1: ScrapeSourcePicker — pick Google or Instagram.
+ * Step 2a (Google):    ScrapeForm           → runGoogleScrape    → /api/scrape (existing)
+ * Step 2b (Instagram): ScrapeFormInstagram  → runInstagramScrape → /api/scrape/discover-ig
+ *
+ * Both paths reuse the same SSE consumer + ScrapeProgress log component.
+ */
 export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientProps) {
+  const [source, setSource] = useState<ScrapeSource | null>(null);
   const [events, setEvents] = useState<ScrapeEvent[]>([]);
   const [running, setRunning] = useState(false);
-  // Per-scrape qualification rule. Defaults each visit (no persistence between
-  // scrapes — see 2026-05-14-rule-on-scrape-design.md).
   const [rule, setRule] = useState<QualificationRule>(DEFAULT_RULE);
 
   function append(ev: ScrapeEvent) {
     setEvents((prev) => [...prev, ev]);
   }
 
-  /** Stream SSE from `url` with `body`. Appends each event into log; returns the
-   *  last event seen (so caller can inspect counts.remaining etc). */
+  /**
+   * Stream SSE from `url` with `body`. Appends each event to the log; returns
+   * the last event seen (so caller can inspect counts.remaining etc).
+   */
   async function streamPost(url: string, body: object): Promise<ScrapeEvent | null> {
     let res: Response;
     try {
@@ -102,15 +102,12 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     return last;
   }
 
-  async function runScrape(req: ScrapeRequest) {
+  async function runGoogleScrape(req: ScrapeRequest) {
     setEvents([]);
     setRunning(true);
-
     try {
       const totalCombos = req.cities.length * req.terms.length;
       let comboIdx = 0;
-
-      // ---- Phase 1: per-(city, term) scrape ----
       append({
         stage: "searching",
         message: `Starting ${totalCombos} chunk${totalCombos === 1 ? "" : "s"} (${req.cities.length} cities × ${req.terms.length} terms)…`,
@@ -134,19 +131,14 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         }
       }
 
-      // ---- Phase 2: IG enrichment (optional, polled until remaining=0) ----
       if (req.enrichInstagram) {
-        append({
-          stage: "enriching",
-          message: "Starting Instagram enrichment phase…",
-        });
-        // Hard safety cap so we never loop forever on a server-side bug.
+        append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
         const SAFETY_CAP = 300;
         let i = 0;
         while (i++ < SAFETY_CAP) {
           const last = await streamPost("/api/scrape/enrich", { batchSize: 3 });
           if (!last) break;
-          if (last.stage === "error") break; // server reported a problem
+          if (last.stage === "error") break;
           const remaining = last.counts?.remaining ?? 0;
           if (remaining <= 0) break;
         }
@@ -164,16 +156,61 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     }
   }
 
+  async function runInstagramScrape(req: InstagramScrapeRequest) {
+    setEvents([]);
+    setRunning(true);
+    try {
+      append({
+        stage: "searching",
+        message: `Starting ${req.methods.length} IG discovery method${req.methods.length === 1 ? "" : "s"}…`,
+      });
+      for (const m of req.methods) {
+        append({
+          stage: "searching",
+          message: `Method: ${m.method} (${m.values.length} value${m.values.length === 1 ? "" : "s"})`,
+        });
+        await streamPost("/api/scrape/discover-ig", {
+          method: m.method,
+          values: m.values,
+          skipExisting: req.skipExisting,
+          rule: req.rule,
+        });
+      }
+      append({ stage: "done", message: "IG scrape complete." });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function handleBack() {
+    setSource(null);
+    setEvents([]);
+  }
+
   return (
     <>
-      <ScrapeForm
-        onSubmit={runScrape}
-        running={running}
-        customTerms={initialCustomTerms}
-        rule={rule}
-        onRuleChange={setRule}
-        citiesInDb={citiesInDb}
-      />
+      {source === null ? (
+        <ScrapeSourcePicker onPick={setSource} />
+      ) : source === "google" ? (
+        <ScrapeForm
+          onSubmit={runGoogleScrape}
+          running={running}
+          customTerms={initialCustomTerms}
+          rule={rule}
+          onRuleChange={setRule}
+          citiesInDb={citiesInDb}
+          onBack={handleBack}
+        />
+      ) : (
+        <ScrapeFormInstagram
+          onSubmit={runInstagramScrape}
+          running={running}
+          rule={rule}
+          onRuleChange={setRule}
+          citiesInDb={citiesInDb}
+          onBack={handleBack}
+        />
+      )}
       <ScrapeProgress events={events} running={running} />
     </>
   );

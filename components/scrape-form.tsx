@@ -46,6 +46,8 @@ interface Props {
   /** Distinct cities currently in the DB — drives the city-restriction picker
    *  inside the qualification rule form. */
   citiesInDb: string[];
+  /** Step 1 (source picker) navigation back hook. */
+  onBack: () => void;
 }
 
 export function ScrapeForm({
@@ -55,6 +57,7 @@ export function ScrapeForm({
   rule,
   onRuleChange,
   citiesInDb,
+  onBack,
 }: Props) {
   const [selectedCities, setSelectedCities] = useState<Set<string>>(new Set());
   const [selectedTerms, setSelectedTerms] = useState<Set<string>>(new Set());
@@ -86,6 +89,14 @@ export function ScrapeForm({
 
   return (
     <div className="space-y-6 rounded-lg border border-border p-6">
+      <button
+        type="button"
+        onClick={onBack}
+        className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+      >
+        ← Back to source picker
+      </button>
+
       {/* Cities */}
       <Section
         title="Cities"
