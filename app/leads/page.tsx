@@ -13,6 +13,12 @@ interface PageProps {
     qualified?: string;
     noWebsite?: string;
     search?: string;
+    hasPhone?: string;
+    hasIg?: string;
+    activeIg?: string;
+    minRating?: string;
+    minReviews?: string;
+    minFollowers?: string;
   }>;
 }
 
@@ -42,6 +48,23 @@ export default async function LeadsPage({ searchParams }: PageProps) {
   if (params.qualified !== "false") q = q.eq("qualified", true);
   if (params.noWebsite === "true") q = q.eq("has_real_website", false);
   if (params.search) q = q.ilike("name", `%${params.search}%`);
+
+  // Per-criterion filters mirror the qualification rule (lib/qualification.ts).
+  // All AND together. Empty/missing param = no filter for that criterion.
+  if (params.hasPhone === "true") {
+    q = q.not("phone", "is", null).neq("phone", "");
+  }
+  if (params.hasIg === "true") q = q.not("instagram_handle", "is", null);
+  if (params.activeIg === "true") q = q.eq("instagram_is_active", true);
+
+  const minRatingNum = parseFloat(params.minRating ?? "");
+  if (Number.isFinite(minRatingNum)) q = q.gte("google_rating", minRatingNum);
+
+  const minReviewsNum = parseInt(params.minReviews ?? "", 10);
+  if (Number.isFinite(minReviewsNum)) q = q.gte("google_review_count", minReviewsNum);
+
+  const minFollowersNum = parseInt(params.minFollowers ?? "", 10);
+  if (Number.isFinite(minFollowersNum)) q = q.gte("instagram_followers", minFollowersNum);
 
   q = q.order("priority", { ascending: false }).order("created_at", { ascending: false });
 
