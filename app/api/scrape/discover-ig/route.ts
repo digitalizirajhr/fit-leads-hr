@@ -103,12 +103,36 @@ export async function POST(req: NextRequest) {
         });
 
         const tDiscoverStart = Date.now();
-        const candidates = await discoverHandles(method, values, apiKey);
+        const { handles: candidates, partial: discoveryPartial } =
+          await discoverHandles(method, values, apiKey, (event) => {
+            if (event.kind === "seed-start") {
+              send({
+                stage: "searching",
+                term,
+                message: `Seed ${event.seed}: ${event.followingCount ?? "?"} accounts followed — fetching paginated…`,
+              });
+            } else if (event.kind === "seed-page") {
+              // Throttle to every 4 pages so we don't spam the SSE stream.
+              if (event.pages % 4 === 0) {
+                send({
+                  stage: "searching",
+                  term,
+                  message: `Seed ${event.seed}: ${event.pages} pages fetched, ${event.uniqueHandles} unique handles so far (${(event.elapsedMs / 1000).toFixed(1)}s)`,
+                });
+              }
+            } else if (event.kind === "seed-done") {
+              send({
+                stage: "searching",
+                term,
+                message: `Seed ${event.seed}: ${event.handles} handles${event.partial ? " (PARTIAL — Hiker pagination budget hit)" : ""} in ${(event.elapsedMs / 1000).toFixed(1)}s`,
+              });
+            }
+          });
         const discoverMs = Date.now() - tDiscoverStart;
         send({
           stage: "searching",
           term,
-          message: `Found ${candidates.length} candidate handles in ${discoverMs}ms`,
+          message: `Found ${candidates.length} candidate handles in ${discoverMs}ms${discoveryPartial ? " (PARTIAL — raise Hiker budget for more)" : ""}`,
           counts: { found: candidates.length },
         });
 

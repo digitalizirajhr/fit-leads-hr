@@ -65,27 +65,56 @@ export async function discoverByLocations(
  * a fitness coach follows other fitness coaches (peers, mentors, friends in
  * the industry); their followers are mostly clients with low lead-gen signal.
  *
- * Hiker's followings endpoint takes a numeric user ID, so each seed needs a
- * profile lookup first to get its `pk`. Two requests per seed plus N pages.
+ * Hiker's followings endpoint:
+ *   - 25 results per page, 2-5s wall-clock per page
+ *   - We parallelize 4 pages at a time with a 40s time budget per seed,
+ *     so for a typical 1000-follow seed we get 600-800 unique handles
+ *     before bailing.
+ *   - `partial: true` is surfaced up so the caller can flag the run as
+ *     partial in the UI (same UX pattern as the Apify cost-cap salvage).
+ *
+ * The caller can pass `onProgress` to receive per-batch progress events
+ * (used by the SSE route to emit live "Fetched X pages, Y unique handles"
+ * messages so the user sees activity instead of a 40s silent stall).
  */
 export async function discoverBySeedFollowing(
   seedUsernames: string[],
   apiKey: string,
-): Promise<string[]> {
+  opts?: {
+    onSeedStart?: (seed: string, followingCount: number | null) => void;
+    onPageProgress?: (info: { seed: string; pages: number; uniqueHandles: number; elapsedMs: number }) => void;
+    onSeedDone?: (info: { seed: string; partial: boolean; pagesFetched: number; elapsedMs: number; handles: number }) => void;
+    timeBudgetMsPerSeed?: number;
+  },
+): Promise<{ handles: string[]; partial: boolean }> {
   const cleaned = seedUsernames
     .map((u) => u.replace(/^@/, "").trim())
     .filter(Boolean);
-  if (cleaned.length === 0) return [];
+  if (cleaned.length === 0) return { handles: [], partial: false };
   const out = new Set<string>();
+  let anyPartial = false;
   for (const seed of cleaned) {
     const remaining = MAX_RESULTS_PER_CALL - out.size;
     if (remaining <= 0) break;
     const profile = await fetchProfile(seed, apiKey);
+    opts?.onSeedStart?.(seed, profile?.following ?? null);
     if (!profile || !profile.userId) continue;
-    const followings = await fetchFollowings(profile.userId, remaining, apiKey);
-    for (const f of followings) out.add(f);
+    const result = await fetchFollowings(profile.userId, remaining, apiKey, {
+      timeBudgetMs: opts?.timeBudgetMsPerSeed,
+      onProgress: (info) =>
+        opts?.onPageProgress?.({ seed, ...info }),
+    });
+    for (const f of result.handles) out.add(f);
+    if (result.partial) anyPartial = true;
+    opts?.onSeedDone?.({
+      seed,
+      partial: result.partial,
+      pagesFetched: result.pagesFetched,
+      elapsedMs: result.elapsedMs,
+      handles: result.handles.length,
+    });
   }
-  return Array.from(out);
+  return { handles: Array.from(out), partial: anyPartial };
 }
 
 /**
@@ -109,20 +138,38 @@ export async function discoverByBioKeywords(
   return Array.from(out);
 }
 
-/** Dispatcher: one method, one set of values → handles. */
+/**
+ * Dispatcher: one method, one set of values → handles. Returns `partial: true`
+ * when the time budget was hit before the upstream API ran out (so the route
+ * can flag the run with a PARTIAL warning in the SSE log).
+ *
+ * `progress` callback fires for seed-method during pagination so the SSE
+ * route can emit live "fetched X pages so far" events.
+ */
+export type DiscoveryProgress =
+  | { kind: "seed-start"; seed: string; followingCount: number | null }
+  | { kind: "seed-page"; seed: string; pages: number; uniqueHandles: number; elapsedMs: number }
+  | { kind: "seed-done"; seed: string; partial: boolean; pagesFetched: number; elapsedMs: number; handles: number };
+
 export async function discoverHandles(
   method: DiscoveryMethod,
   values: string[],
   apiKey: string,
-): Promise<string[]> {
+  onProgress?: (event: DiscoveryProgress) => void,
+): Promise<{ handles: string[]; partial: boolean }> {
   switch (method) {
     case "hashtag":
-      return discoverByHashtags(values, apiKey);
+      return { handles: await discoverByHashtags(values, apiKey), partial: false };
     case "location":
-      return discoverByLocations(values, apiKey);
+      return { handles: await discoverByLocations(values, apiKey), partial: false };
     case "seed":
-      return discoverBySeedFollowing(values, apiKey);
+      return discoverBySeedFollowing(values, apiKey, {
+        onSeedStart: (seed, followingCount) =>
+          onProgress?.({ kind: "seed-start", seed, followingCount }),
+        onPageProgress: (info) => onProgress?.({ kind: "seed-page", ...info }),
+        onSeedDone: (info) => onProgress?.({ kind: "seed-done", ...info }),
+      });
     case "bio_keyword":
-      return discoverByBioKeywords(values, apiKey);
+      return { handles: await discoverByBioKeywords(values, apiKey), partial: false };
   }
 }
