@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 import { extractHandle, enrichAll } from "@/lib/instagram";
+import { requireAuth } from "@/lib/require-auth";
 import type { ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -29,6 +30,10 @@ const MAX_BATCH = 10;
  * The client polls this endpoint until remaining = 0.
  */
 export async function POST(req: NextRequest) {
+  // Inline auth (middleware skips this route to avoid breaking SSE).
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+
   const apifyToken = process.env.APIFY_TOKEN;
   if (!apifyToken) {
     return new Response(

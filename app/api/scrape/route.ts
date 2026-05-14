@@ -3,6 +3,7 @@ import { getServerSupabase } from "@/lib/supabase-server";
 import { searchPlaces, type RawPlace } from "@/lib/places";
 import { checkWebsitesParallel } from "@/lib/website-check";
 import { computeQualified } from "@/lib/qualification";
+import { requireAuth } from "@/lib/require-auth";
 import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -34,6 +35,10 @@ interface Body {
  * polled by the client).
  */
 export async function POST(req: NextRequest) {
+  // Inline auth (middleware skips this route to avoid breaking SSE).
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     return new Response(

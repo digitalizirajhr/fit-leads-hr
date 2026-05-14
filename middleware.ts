@@ -87,8 +87,12 @@ export async function middleware(req: NextRequest) {
   return response;
 }
 
-// Skip middleware for Next.js internals + static assets. Everything else
-// (pages + API) goes through the auth gate.
+// Skip middleware for Next.js internals, static assets, AND the SSE-streaming
+// routes (which do their own inline auth check at the top — middleware's
+// NextResponse.next() wrapping interferes with the streaming response and
+// breaks the pipe to the client).
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|api/scrape).*)",
+  ],
 };
