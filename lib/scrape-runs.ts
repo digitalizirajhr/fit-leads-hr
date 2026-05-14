@@ -48,6 +48,60 @@ export async function finalizeScrapeRun(
 }
 
 /**
+ * Mark any run still `running` for longer than `staleMinutes` as `error` with
+ * a marker message. Catches the "user closed their browser tab mid-scrape"
+ * case where finalize never got called.
+ *
+ * Best-effort: errors are swallowed (logged) so a janitor hiccup doesn't
+ * fail the page render that triggered it.
+ *
+ * The qualified/new counts are populated from the rows actually linked to
+ * each run so even an abandoned run shows useful numbers.
+ */
+export async function janitorFinalizeStaleRuns(staleMinutes = 10): Promise<void> {
+  const supabase = getServerSupabase();
+  const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+
+  const { data: stale, error } = await supabase
+    .from("scrape_runs")
+    .select("id")
+    .eq("status", "running")
+    .lt("started_at", cutoff);
+  if (error) {
+    console.error(`janitor: ${error.message}`);
+    return;
+  }
+  if (!stale || stale.length === 0) return;
+
+  for (const r of stale) {
+    const { count: totalLinks } = await supabase
+      .from("scrape_run_leads")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", r.id as string);
+    const { count: qualifiedLinks } = await supabase
+      .from("scrape_run_leads")
+      .select("leads!inner(qualified)", { count: "exact", head: true })
+      .eq("run_id", r.id as string)
+      .eq("leads.qualified", true);
+
+    await supabase
+      .from("scrape_runs")
+      .update({
+        status: "error",
+        ended_at: new Date().toISOString(),
+        counts: {
+          found: totalLinks ?? 0,
+          qualified: qualifiedLinks ?? 0,
+          new: totalLinks ?? 0,
+          skipped: 0,
+        },
+        error_message: `Auto-finalized by janitor (orchestration tab closed before finalize)`,
+      })
+      .eq("id", r.id as string);
+  }
+}
+
+/**
  * Link upserted leads to a run. Best-effort — we log on failure but don't
  * throw so a hiccup linking doesn't fail an otherwise-successful chunk.
  * `ignoreDuplicates` makes re-runs idempotent.
