@@ -130,23 +130,30 @@ export async function POST(req: NextRequest) {
           ]),
         );
 
-        // Per-place_id UPDATE (not upsert — rows already exist).
+        // Per-place_id UPDATE. ALWAYS write a row even when Apify returned
+        // no profile for the handle (private/deleted accounts) or returned
+        // null follower count — otherwise instagram_followers stays NULL
+        // and the next /api/scrape/enrich call picks the same lead up
+        // again, looping forever.
+        //
+        // We use `0` as the "tried but no useful data" sentinel for
+        // instagram_followers. Real accounts with 0 followers exist but
+        // are vanishingly rare for our purposes.
         let processed = 0;
+        let unreachable = 0;
         for (const placeId of placeIds) {
           const handle = handlesByPlaceId.get(placeId)!;
           const profile = enriched.get(handle);
-          if (!profile) continue;
-
-          const isCoach = coachHandles.has(handle);
+          const isCoach = profile ? coachHandles.has(handle) : false;
           const override = overrideMap.get(placeId);
+
           const updates: Record<string, unknown> = {
-            instagram_handle: profile.handle,
-            instagram_followers: profile.followers,
-            instagram_bio: profile.bio,
-            instagram_last_post_at: profile.latestPostAt,
-            instagram_is_active: profile.isActive,
+            instagram_handle: profile?.handle ?? handle,
+            instagram_followers: profile?.followers ?? 0,
+            instagram_bio: profile?.bio ?? null,
+            instagram_last_post_at: profile?.latestPostAt ?? null,
+            instagram_is_active: profile?.isActive ?? null,
           };
-          // Only auto-update qualified when there's no manual override.
           if (override === null || override === undefined) {
             updates.qualified = isCoach;
           }
@@ -156,6 +163,13 @@ export async function POST(req: NextRequest) {
             .update(updates)
             .eq("place_id", placeId);
           if (!igErr) processed++;
+          if (!profile) unreachable++;
+        }
+        if (unreachable > 0) {
+          send({
+            stage: "filtering",
+            message: `${unreachable} handles were unreachable (private / deleted) — marked as tried so they don't loop`,
+          });
         }
 
         const remaining = totalPending - placeIds.length;
