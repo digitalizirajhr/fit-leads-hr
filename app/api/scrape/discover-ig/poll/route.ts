@@ -142,48 +142,58 @@ export async function POST(req: NextRequest) {
 
             const supabase = getServerSupabase();
 
-            // Skip-existing — chunked.
+            // Skip-existing — single-shot, no .in() clauses.
             //
-            // PostgREST encodes .in() as a URL query string: passing 990
-            // values made a ~15 KB URL, which silently hung the request and
-            // killed the function before any further events could fire (the
-            // hallmark of "Found N candidate handles" looping forever in
-            // the UI). We split the check into 100-item chunks so each URL
-            // stays well under any common limit.
+            // Earlier attempts used .in("place_id", [990 items]) which made
+            // the PostgREST URL ~15 KB and silently hung the request.
+            // Chunking to 100-item .in() helped the URL length, but each
+            // .in() still triggered a full table scan on the unindexed
+            // instagram_handle column — 10 chunks × full scan blew the
+            // 60 s function budget.
+            //
+            // The right shape: fetch all IG-flavoured rows in TWO queries
+            // with no IN clauses, build a Set in memory, filter candidates
+            // against it. place_id is the PK so the LIKE 'ig:%' uses the
+            // btree index; instagram_handle is one full scan (~few hundred
+            // ms even at 10k rows). We'll know if this is slow because the
+            // diagnostic timing line below reports it.
             let toUpsert = candidates;
             let skippedExisting = 0;
             if (skipExisting) {
-              const EXISTING_CHECK_CHUNK = 100;
+              const tCheckStart = Date.now();
+              const [allPids, allHandles] = await Promise.all([
+                supabase
+                  .from("leads")
+                  .select("place_id")
+                  .like("place_id", "ig:%")
+                  .limit(100000),
+                supabase
+                  .from("leads")
+                  .select("instagram_handle")
+                  .not("instagram_handle", "is", null)
+                  .limit(100000),
+              ]);
+              if (allPids.error)
+                throw new Error(`Existing-check (place_id): ${allPids.error.message}`);
+              if (allHandles.error)
+                throw new Error(`Existing-check (handle): ${allHandles.error.message}`);
+
               const existingSet = new Set<string>();
-              for (let i = 0; i < candidates.length; i += EXISTING_CHECK_CHUNK) {
-                const slice = candidates.slice(i, i + EXISTING_CHECK_CHUNK);
-                const placeIds = slice.map((h) => `ig:${h}`);
-                const [byPid, byHandle] = await Promise.all([
-                  supabase.from("leads").select("place_id").in("place_id", placeIds),
-                  supabase
-                    .from("leads")
-                    .select("instagram_handle")
-                    .in("instagram_handle", slice),
-                ]);
-                if (byPid.error)
-                  throw new Error(`Existing-check (place_id): ${byPid.error.message}`);
-                if (byHandle.error)
-                  throw new Error(`Existing-check (handle): ${byHandle.error.message}`);
-                for (const r of byPid.data ?? []) {
-                  const pid = r.place_id as string;
-                  if (pid.startsWith("ig:")) existingSet.add(pid.slice(3).toLowerCase());
-                }
-                for (const r of byHandle.data ?? []) {
-                  if (r.instagram_handle)
-                    existingSet.add((r.instagram_handle as string).toLowerCase());
-                }
+              for (const r of allPids.data ?? []) {
+                const pid = r.place_id as string;
+                if (pid.startsWith("ig:")) existingSet.add(pid.slice(3).toLowerCase());
+              }
+              for (const r of allHandles.data ?? []) {
+                if (r.instagram_handle)
+                  existingSet.add((r.instagram_handle as string).toLowerCase());
               }
               toUpsert = candidates.filter((h) => !existingSet.has(h));
               skippedExisting = candidates.length - toUpsert.length;
+              const checkMs = Date.now() - tCheckStart;
               send({
                 stage: "filtering",
                 term,
-                message: `Skipped ${skippedExisting} already in DB; upserting ${toUpsert.length} raw rows`,
+                message: `Skipped ${skippedExisting} already in DB; upserting ${toUpsert.length} raw rows (existing-check ${checkMs}ms, scanned ${(allPids.data?.length ?? 0) + (allHandles.data?.length ?? 0)} known IG rows)`,
                 counts: { skipped: skippedExisting },
               });
             }
