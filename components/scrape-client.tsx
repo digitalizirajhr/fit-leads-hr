@@ -146,9 +146,14 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
    * (SSE) repeatedly until that Apify run is fully processed. Outer loop
    * exits when /start reports no more pending derivable handles.
    *
+   * The qualification rule flows through to /enrich/poll so post-enrichment
+   * `qualified` reflects both the AI coach verdict AND the rule thresholds
+   * (min followers, active IG, etc.). Without this, scraping with "min IG
+   * followers 500" would leave 50-follower coaches marked qualified=true.
+   *
    * Returns true on success, false if any error happened.
    */
-  async function runEnrichmentPhase(): Promise<boolean> {
+  async function runEnrichmentPhase(rule: QualificationRule): Promise<boolean> {
     // Outer cap protects against an infinite loop if a bug ever causes
     // /start to keep returning the same handles. 50 outer iterations ×
     // 1000 handles per Apify run = 50k max enrichments per scrape.
@@ -210,6 +215,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         const last = await streamPost("/api/scrape/enrich/poll", {
           apifyRunId,
           requestedHandles,
+          rule,
         });
         if (!last) {
           await new Promise((r) => setTimeout(r, 2000));
@@ -286,7 +292,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
 
       if (req.enrichInstagram) {
         append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
-        const ok = await runEnrichmentPhase();
+        const ok = await runEnrichmentPhase(req.rule);
         if (!ok) hadError = true;
       }
 
@@ -414,7 +420,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
         stage: "enriching",
         message: "Discovery done. Now enriching profiles + classifying coaches via async Apify run…",
       });
-      const ok = await runEnrichmentPhase();
+      const ok = await runEnrichmentPhase(req.rule);
       if (!ok) hadError = true;
 
       append({ stage: "done", message: "IG scrape complete." });

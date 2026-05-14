@@ -3,8 +3,9 @@ import { getServerSupabase } from "@/lib/supabase-server";
 import { extractHandle, fetchEnrichmentDataset } from "@/lib/instagram";
 import { getDiscoveryRun } from "@/lib/instagram-discovery";
 import { filterCoaches } from "@/lib/coach-classifier";
+import { computeQualified } from "@/lib/qualification";
 import { requireAuth } from "@/lib/require-auth";
-import type { ScrapeEvent } from "@/lib/types";
+import { DEFAULT_RULE, type QualificationRule, type ScrapeEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -15,6 +16,10 @@ interface Body {
    *  pending leads belong to this Apify run (so we don't accidentally
    *  process leads added after the run started). */
   requestedHandles?: string[];
+  /** Qualification rule to apply once we have enriched data. Without this
+   *  the route falls back to the AI coach verdict alone, which means rule
+   *  thresholds (min followers, active IG, etc.) are silently ignored. */
+  rule?: Partial<QualificationRule>;
 }
 
 // Same poll semantics as discovery: poll Apify for up to ~45s of wall-clock,
@@ -54,6 +59,7 @@ export async function POST(req: NextRequest) {
   const requestedHandles = Array.isArray(body.requestedHandles)
     ? body.requestedHandles.filter((h): h is string => typeof h === "string")
     : [];
+  const rule: QualificationRule = { ...DEFAULT_RULE, ...(body.rule ?? {}) };
 
   if (!apifyRunId) {
     return new Response(
@@ -128,9 +134,15 @@ export async function POST(req: NextRequest) {
 
         // Find the next chunk of pending leads whose handle is in this
         // Apify run's request list. Sorted oldest-first for determinism.
+        // Pull ALL fields the qualification rule reads (lib/qualification.ts)
+        // so we can re-evaluate `qualified` properly once we have enrichment
+        // data — without these the rule's IG-related thresholds (min
+        // followers, active IG) get silently ignored.
         const { data: pending, error: pendErr } = await supabase
           .from("leads")
-          .select("place_id, current_website, instagram_handle, qualified_override")
+          .select(
+            "place_id, current_website, instagram_handle, qualified_override, has_real_website, phone, google_rating, google_review_count, city",
+          )
           .is("instagram_followers", null)
           .order("created_at", { ascending: true })
           .limit(50000);
@@ -140,6 +152,13 @@ export async function POST(req: NextRequest) {
           placeId: string;
           handle: string;
           override: boolean | null;
+          // Carry the existing non-IG fields so we can feed the rule with
+          // a complete picture (rule may also gate on phone, rating, etc.).
+          hasRealWebsite: boolean | null;
+          phone: string | null;
+          googleRating: number | null;
+          googleReviewCount: number | null;
+          city: string | null;
         }
         const toProcess: ProcessItem[] = [];
         for (const row of pending ?? []) {
@@ -151,6 +170,11 @@ export async function POST(req: NextRequest) {
               placeId: row.place_id as string,
               handle,
               override: row.qualified_override as boolean | null,
+              hasRealWebsite: row.has_real_website as boolean | null,
+              phone: row.phone as string | null,
+              googleRating: row.google_rating as number | null,
+              googleReviewCount: row.google_review_count as number | null,
+              city: row.city as string | null,
             });
           }
         }
@@ -196,6 +220,8 @@ export async function POST(req: NextRequest) {
         let processed = 0;
         let unreachable = 0;
         let updatedRowCount = 0;
+        let qualifiedThisChunk = 0;
+        let droppedByRule = 0;
         for (const item of toProcess) {
           const profile = profileByHandle.get(item.handle);
           const isCoach = profile ? coachHandles.has(item.handle) : false;
@@ -207,8 +233,28 @@ export async function POST(req: NextRequest) {
             instagram_last_post_at: profile?.latestPostAt ?? null,
             instagram_is_active: profile?.isActive ?? null,
           };
+          // Only auto-set qualified when there's no manual override on this
+          // lead. Qualified now = coach AND passes the qualification rule
+          // (which can have thresholds the AI verdict alone doesn't know
+          // about, like min IG followers, requires-active-IG, etc.).
           if (item.override === null || item.override === undefined) {
-            updates.qualified = isCoach;
+            const passesRule = computeQualified(
+              {
+                has_real_website: item.hasRealWebsite ?? false,
+                phone: item.phone,
+                google_rating: item.googleRating,
+                google_review_count: item.googleReviewCount,
+                instagram_handle: profile?.handle ?? item.handle,
+                instagram_is_active: profile?.isActive ?? null,
+                instagram_followers: profile?.followers ?? 0,
+                city: item.city,
+              },
+              rule,
+            );
+            const finalQualified = isCoach && passesRule;
+            updates.qualified = finalQualified;
+            if (finalQualified) qualifiedThisChunk++;
+            else if (isCoach && !passesRule) droppedByRule++;
           }
 
           const { data: updatedRows, error: igErr } = await supabase
@@ -226,6 +272,16 @@ export async function POST(req: NextRequest) {
             message: `${unreachable} handles were unreachable (private / deleted) — marked as tried (instagram_followers=0)`,
           });
         }
+        if (droppedByRule > 0) {
+          send({
+            stage: "filtering",
+            message: `${droppedByRule} confirmed coaches dropped by qualification rule (e.g. below min followers / inactive on IG)`,
+          });
+        }
+        send({
+          stage: "filtering",
+          message: `${qualifiedThisChunk}/${toProcess.length} leads qualified this chunk (coach AND rule)`,
+        });
         send({
           stage: "filtering",
           message: `DB confirmed ${updatedRowCount}/${toProcess.length} rows updated (sample place_id: ${toProcess[0].placeId})`,
