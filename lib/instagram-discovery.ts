@@ -5,10 +5,12 @@
 // Actor IDs verified against https://apify.com/store on 2026-05-14:
 //   - apify/instagram-hashtag-scraper      (official)
 //   - apify/instagram-scraper              (official, multi-purpose)
-//   - louisdeconinck/instagram-following-scraper (community — scrapes the
-//     "following" list of a profile, i.e. accounts the seed FOLLOWS. We use
-//     "following" not "followers" because a coach's peers are who THEY follow;
-//     their followers are mostly clients and have lower lead-gen signal.)
+//   - coderx/instagram-followers-following-scraper-no-cookies-login (community,
+//     free tier — scrapes who a profile FOLLOWS. We use "following" not
+//     "followers" because a coach's peers are who THEY follow; their followers
+//     are mostly clients with low lead-gen signal. Tried louisdeconinck's
+//     equivalent first but it returned "Free users need cookies" without
+//     a paid Apify plan.)
 
 const MAX_RESULTS_PER_CALL = 100;
 
@@ -17,7 +19,7 @@ const HASHTAG_ENDPOINT =
 const GENERIC_ENDPOINT =
   "https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items";
 const FOLLOWING_ENDPOINT =
-  "https://api.apify.com/v2/acts/louisdeconinck~instagram-following-scraper/run-sync-get-dataset-items";
+  "https://api.apify.com/v2/acts/coderx~instagram-followers-following-scraper-no-cookies-login/run-sync-get-dataset-items";
 
 export type DiscoveryMethod = "hashtag" | "location" | "seed" | "bio_keyword";
 
@@ -101,6 +103,9 @@ export async function discoverByLocations(
  * Accounts that the given seeds FOLLOW (not their followers). The intuition:
  * a fitness coach follows other fitness coaches (peers, mentors, friends in
  * the industry); their followers are mostly clients with low lead-gen signal.
+ *
+ * The coderx actor takes ONE username per run, so we loop through the seeds
+ * and dedupe across all of them.
  */
 export async function discoverBySeedFollowing(
   seedUsernames: string[],
@@ -111,11 +116,16 @@ export async function discoverBySeedFollowing(
     .filter(Boolean);
   if (cleaned.length === 0) return [];
   const url = `${FOLLOWING_ENDPOINT}?token=${apifyToken}`;
-  const items = await postJson<ApifyFollowedAccount[]>(url, {
-    usernames: cleaned,
-    resultsLimit: MAX_RESULTS_PER_CALL,
-  });
-  return uniqueLower(items.map((f) => f.username));
+  const all: string[] = [];
+  for (const seed of cleaned) {
+    const items = await postJson<ApifyFollowedAccount[]>(url, {
+      username: seed,
+      type: "following",
+      resultsLimit: MAX_RESULTS_PER_CALL,
+    });
+    for (const f of items) if (f.username) all.push(f.username);
+  }
+  return uniqueLower(all);
 }
 
 /**
