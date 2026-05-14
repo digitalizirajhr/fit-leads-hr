@@ -110,6 +110,36 @@ export interface Settings {
   customTerms: string[];
 }
 
+export type ScrapeSourceType = "google" | "instagram";
+export type ScrapeRunStatus = "running" | "done" | "error";
+
+export interface ScrapeCounts {
+  found?: number;
+  qualified?: number;
+  new?: number;
+  skipped?: number;
+}
+
+/** One row in the `scrape_runs` table. Matches the schema 1:1. */
+export interface ScrapeRun {
+  id: string;
+  started_at: string;
+  ended_at: string | null;
+  source: ScrapeSourceType;
+  /** Free-form per source. For google: { cities, terms, rule, skipExisting, … }.
+   *  For instagram: { methods: [{method, values}], rule, skipExisting }. */
+  params: Record<string, unknown>;
+  counts: ScrapeCounts;
+  status: ScrapeRunStatus;
+  error_message: string | null;
+}
+
+/** Detail-page payload from GET /api/scrape-runs/:id. */
+export interface ScrapeRunWithLeads {
+  run: ScrapeRun;
+  leads: Lead[];
+}
+
 export interface ScrapeEvent {
   stage: ScrapeStage;
   city?: string;
