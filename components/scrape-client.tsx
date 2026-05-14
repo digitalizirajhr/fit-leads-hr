@@ -99,6 +99,22 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
       }
     }
 
+    const tail = buffer.trim();
+    if (tail.startsWith("data:")) {
+      const payload = tail.slice(5).trim();
+      if (payload) {
+        try {
+          const ev = JSON.parse(payload) as ScrapeEvent;
+          append(ev);
+          last = ev;
+        } catch {
+          const ev: ScrapeEvent = { stage: "error", message: `Bad SSE: ${payload}` };
+          append(ev);
+          last = ev;
+        }
+      }
+    }
+
     return last;
   }
 
@@ -140,109 +156,42 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
   }
 
   /**
-   * Run the enrichment phase using the async start+poll pattern. Outer loop:
-   * call /enrich/start to kick off ONE Apify run for up to 1000 pending
-   * handles; persist the requestedHandles list. Inner loop: call /enrich/poll
-   * (SSE) repeatedly until that Apify run is fully processed. Outer loop
-   * exits when /start reports no more pending derivable handles.
+   * Run the enrichment phase by repeatedly POSTing to the sync /enrich
+   * endpoint until counts.remaining = 0. Since we migrated from Apify to
+   * HikerAPI, there's no actor cold-start tax to amortize, so this simple
+   * loop replaces the previous start+poll dance entirely. Each call
+   * enriches batchSize (default 50) profiles in ~10s.
    *
-   * The qualification rule flows through to /enrich/poll so post-enrichment
+   * The qualification rule flows through to /enrich so post-enrichment
    * `qualified` reflects both the AI coach verdict AND the rule thresholds
-   * (min followers, active IG, etc.). Without this, scraping with "min IG
-   * followers 500" would leave 50-follower coaches marked qualified=true.
-   *
-   * Returns true on success, false if any error happened.
+   * (min followers, active IG, etc.).
    */
   async function runEnrichmentPhase(
     rule: QualificationRule,
+    runId: string,
   ): Promise<{ ok: boolean; errorMessage: string | null }> {
-    // Outer cap protects against an infinite loop if a bug ever causes
-    // /start to keep returning the same handles. 50 outer iterations ×
-    // 1000 handles per Apify run = 50k max enrichments per scrape.
-    const OUTER_CAP = 50;
-    const INNER_POLL_RETRY_CAP = 30;
-    let outerOk = true;
+    // 1000 batches × 50 leads = 50k max enrichments per scrape. The cap
+    // exists to prevent a real bug from running up the HikerAPI bill, not
+    // to limit normal usage.
+    const SAFETY_CAP = 1000;
     let lastErrorMessage: string | null = null;
 
-    for (let outer = 0; outer < OUTER_CAP; outer++) {
-      // Step 1: kick off Apify enrichment run.
-      let apifyRunId: string;
-      let requestedHandles: string[];
-      let totalPending: number;
-      try {
-        const startResp = await fetch("/api/scrape/enrich/start", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-        if (!startResp.ok) {
-          const txt = await startResp.text().catch(() => "");
-          const msg = `Failed to start enrich Apify run: ${startResp.status} ${txt || startResp.statusText}`;
-          append({ stage: "error", message: msg });
-          return { ok: false, errorMessage: msg };
-        }
-        const json = (await startResp.json()) as {
-          apifyRunId: string | null;
-          requestedHandles: string[];
-          totalRequested: number;
-          totalPending: number;
-        };
-        if (!json.apifyRunId || json.totalRequested === 0) {
-          append({
-            stage: "done",
-            message: `Enrichment complete — no more pending derivable handles (${json.totalPending} total pending in DB).`,
-          });
-          return { ok: outerOk, errorMessage: outerOk ? null : lastErrorMessage };
-        }
-        apifyRunId = json.apifyRunId;
-        requestedHandles = json.requestedHandles;
-        totalPending = json.totalPending;
-      } catch (err) {
-        const msg = `Network error starting enrich: ${(err as Error).message}`;
-        append({ stage: "error", message: msg });
-        return { ok: false, errorMessage: msg };
-      }
-
-      append({
-        stage: "enriching",
-        message: `Apify enrichment run #${outer + 1}: ${requestedHandles.length} handles in one batch (${totalPending} total pending in DB)`,
+    for (let i = 0; i < SAFETY_CAP; i++) {
+      const last = await streamPost("/api/scrape/enrich", {
+        batchSize: 50,
+        runId,
+        rule,
       });
-
-      // Step 2: poll until this Apify run is fully processed.
-      let runFinished = false;
-      for (let p = 0; p < INNER_POLL_RETRY_CAP; p++) {
-        const last = await streamPost("/api/scrape/enrich/poll", {
-          apifyRunId,
-          requestedHandles,
-          rule,
-        });
-        if (!last) {
-          await new Promise((r) => setTimeout(r, 2000));
-          continue;
-        }
-        if (last.stage === "error") {
-          outerOk = false;
-          lastErrorMessage = last.message ?? lastErrorMessage;
-          runFinished = true;
-          break;
-        }
-        if (last.stage === "done") {
-          runFinished = true;
-          break;
-        }
-        // __POLL_AGAIN__ marker — pause briefly, then re-poll.
-        await new Promise((r) => setTimeout(r, 2000));
+      if (!last) break;
+      if (last.stage === "error") {
+        lastErrorMessage = last.message ?? null;
+        return { ok: false, errorMessage: lastErrorMessage };
       }
-      if (!runFinished) {
-        const msg = `Hit poll cap (${INNER_POLL_RETRY_CAP}) for enrich run ${apifyRunId.slice(0, 8)}.`;
-        append({ stage: "error", message: msg });
-        return { ok: false, errorMessage: msg };
-      }
+      const remaining = last.counts?.remaining ?? 0;
+      if (remaining <= 0) break;
     }
 
-    const msg = `Hit outer cap (${OUTER_CAP}) on enrichment phase. Run /scrape again to continue.`;
-    append({ stage: "error", message: msg });
-    return { ok: false, errorMessage: msg };
+    return { ok: true, errorMessage: null };
   }
 
   async function runGoogleScrape(req: ScrapeRequest) {
@@ -254,6 +203,9 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
 
     try {
+      if (!runId) {
+        throw new Error("Could not create scrape run. No scraping was started.");
+      }
       const totalCombos = req.cities.length * req.terms.length;
       let comboIdx = 0;
       append({
@@ -292,7 +244,7 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
 
       if (req.enrichInstagram) {
         append({ stage: "enriching", message: "Starting Instagram enrichment phase…" });
-        const result = await runEnrichmentPhase(req.rule);
+        const result = await runEnrichmentPhase(req.rule, runId);
         if (!result.ok) {
           hadError = true;
           lastErrorMessage = result.errorMessage ?? lastErrorMessage;
@@ -326,6 +278,9 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
     const totals = { found: 0, qualified: 0, new: 0, skipped: 0 };
 
     try {
+      if (!runId) {
+        throw new Error("Could not create scrape run. No scraping was started.");
+      }
       append({
         stage: "searching",
         message: `Starting ${req.methods.length} IG discovery method${req.methods.length === 1 ? "" : "s"}…`,
@@ -336,98 +291,46 @@ export function ScrapeClient({ initialCustomTerms, citiesInDb }: ScrapeClientPro
           message: `Method: ${m.method} (${m.values.length} value${m.values.length === 1 ? "" : "s"})`,
         });
 
-        // Step 1: kick off the Apify run (returns immediately with runId).
-        // Big seeds like fitness_byiva @ 603 followings take 90+ seconds in
-        // the actor — way over Vercel's 60s function limit — so we can't
-        // wait for it inline.
-        let apifyRunId: string;
-        try {
-          const startResp = await fetch("/api/scrape/discover-ig/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ method: m.method, values: m.values }),
-          });
-          if (!startResp.ok) {
-            const txt = await startResp.text().catch(() => "");
-            const msg = `Failed to start Apify run for ${m.method}: ${startResp.status} ${txt || startResp.statusText}`;
-            append({ stage: "error", message: msg });
-            hadError = true;
-            lastErrorMessage = msg;
-            continue;
-          }
-          const json = (await startResp.json()) as { apifyRunId?: string; error?: string };
-          if (!json.apifyRunId) {
-            const msg = `No apifyRunId returned for ${m.method}: ${json.error ?? "unknown"}`;
-            append({ stage: "error", message: msg });
-            hadError = true;
-            lastErrorMessage = msg;
-            continue;
-          }
-          apifyRunId = json.apifyRunId;
-        } catch (err) {
-          const msg = `Network error starting ${m.method}: ${(err as Error).message}`;
+        // Single sync call — HikerAPI has no cold-start, so the previous
+        // start/poll dance is gone. The endpoint does discovery + dedup +
+        // chunked upsert + link-to-run in one shot, streaming progress
+        // events along the way.
+        const last = await streamPost("/api/scrape/discover-ig", {
+          method: m.method,
+          values: m.values,
+          skipExisting: req.skipExisting,
+          rule: req.rule,
+          runId,
+        });
+        if (!last) {
+          const msg = `No SSE events from discover-ig for ${m.method}`;
           append({ stage: "error", message: msg });
           hadError = true;
           lastErrorMessage = msg;
           continue;
         }
-
-        // Step 2: poll the run. Each /poll call burns up to ~50s polling
-        // Apify, then either returns `done` (run finished, dataset saved)
-        // or a `__POLL_AGAIN__` marker if the run is still going. We just
-        // re-call /poll until one of those two outcomes wins. The safety
-        // cap is a worst-case guard — at ~50s/call, 30 polls = 25 minutes.
-        const POLL_RETRY_CAP = 30;
-        let methodFinished = false;
-        for (let p = 0; p < POLL_RETRY_CAP; p++) {
-          const last = await streamPost("/api/scrape/discover-ig/poll", {
-            apifyRunId,
-            method: m.method,
-            skipExisting: req.skipExisting,
-            rule: req.rule,
-            runId,
-          });
-          if (!last) {
-            // Stream closed without any event — treat as transient, retry.
-            await new Promise((r) => setTimeout(r, 2000));
-            continue;
-          }
-          if (last.stage === "error") {
-            hadError = true;
-            lastErrorMessage = last.message ?? lastErrorMessage;
-            methodFinished = true;
-            break;
-          }
-          if (last.stage === "done") {
-            if (last.counts) {
-              totals.found += last.counts.found ?? 0;
-              totals.qualified += last.counts.qualified ?? 0;
-              totals.new += last.counts.new ?? 0;
-              totals.skipped += last.counts.skipped ?? 0;
-            }
-            methodFinished = true;
-            break;
-          }
-          // Otherwise it was the __POLL_AGAIN__ marker. Brief pause, then
-          // call /poll again so it can resume polling Apify for another 50s.
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-        if (!methodFinished) {
-          const msg = `Hit poll retry cap (${POLL_RETRY_CAP}) for ${m.method}; Apify run still not finished.`;
-          append({ stage: "error", message: msg });
+        if (last.stage === "error") {
           hadError = true;
-          lastErrorMessage = msg;
+          lastErrorMessage = last.message ?? lastErrorMessage;
+          continue;
+        }
+        if (last.counts) {
+          totals.found += last.counts.found ?? 0;
+          totals.qualified += last.counts.qualified ?? 0;
+          totals.new += last.counts.new ?? 0;
+          totals.skipped += last.counts.skipped ?? 0;
         }
       }
 
-      // After discovery, run enrichment using the async start+poll pattern.
-      // The enrich endpoint sets qualified=true for AI-confirmed coaches,
-      // false otherwise (respecting any manual overrides).
+      // After discovery, run enrichment by looping the sync /enrich
+      // endpoint until pending = 0. The enrich endpoint sets
+      // qualified = (isCoach AND passes rule), respecting any manual
+      // overrides.
       append({
         stage: "enriching",
-        message: "Discovery done. Now enriching profiles + classifying coaches via async Apify run…",
+        message: "Discovery done. Now enriching profiles + classifying coaches via HikerAPI…",
       });
-      const result = await runEnrichmentPhase(req.rule);
+      const result = await runEnrichmentPhase(req.rule, runId);
       if (!result.ok) {
         hadError = true;
         lastErrorMessage = result.errorMessage ?? lastErrorMessage;
